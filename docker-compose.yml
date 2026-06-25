@@ -35,6 +35,13 @@ services:
       TAVILY_1_API_KEY: XXX      # optional (primary)
       TAVILY_2_API_KEY: XXX      # optional (failover)
       FIRECRAWL_API_KEY: XXX     # optional
+      # --- per-instance proxy (optional, SOCKS5/HTTP; for clean egress) ---
+      # EXA_PROXY: socks5://internal.lc:1080
+      # SERPER_PROXY: socks5://internal.lc:1080
+      # JINA_PROXY: socks5://internal.lc:1080
+      # TAVILY_1_PROXY: socks5://internal.lc:1080
+      # TAVILY_2_PROXY: socks5://internal.lc:1080
+      # FIRECRAWL_PROXY: socks5://internal.lc:1080
       TZ: Europe/Moscow
     networks:
       - docker_main_net

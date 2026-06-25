@@ -29,6 +29,7 @@ class ExaSearch:
         if not config.api_key:
             raise ValueError("exa requires an api_key")
         self.name = config.name
+        self.proxy = config.proxy
         self._config = config
 
     async def search(

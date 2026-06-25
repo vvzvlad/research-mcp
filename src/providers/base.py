@@ -41,9 +41,11 @@ class SearchResult:
 class ProviderConfig:
     """Resolved configuration handed to a provider instance at build time.
 
-    ``url`` / ``api_key`` / ``token`` are the *values* already read from the
-    environment by the instance loader — never env var names. ``options`` holds
-    extra per-instance settings if ever needed.
+    ``url`` / ``api_key`` / ``token`` / ``proxy`` are the *values* already read
+    from the environment by the instance loader — never env var names. ``proxy``
+    is a SOCKS5/HTTP proxy URL this instance must route through (None = direct);
+    the pipeline picks the httpx client bound to it. ``options`` holds extra
+    per-instance settings if ever needed.
     """
 
     name: str
@@ -53,6 +55,7 @@ class ProviderConfig:
     url: str | None = None
     api_key: str | None = None
     token: str | None = None
+    proxy: str | None = None
     options: dict[str, str] = field(default_factory=dict)
 
 
@@ -61,6 +64,9 @@ class SearchProvider(Protocol):
     """A configured search instance."""
 
     name: str
+    # Proxy URL this instance routes through (None = direct egress). The pipeline
+    # reads it to pick the httpx client bound to this instance's proxy.
+    proxy: str | None
 
     async def search(
         self,
@@ -79,6 +85,8 @@ class ReadProvider(Protocol):
     """A configured read/extract instance."""
 
     name: str
+    # Proxy URL this instance routes through (None = direct egress).
+    proxy: str | None
 
     async def read(self, client: httpx.AsyncClient, url: str) -> str:
         """Return page content as Markdown, or raise ``ProviderError``.

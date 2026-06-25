@@ -82,6 +82,22 @@ Provider env vars: `SEARXNG_URL`, `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY
 (optional), `CRAWL4AI_URL` + `CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`,
 `TAVILY_2_API_KEY`, `FIRECRAWL_API_KEY`.
 
+## Proxy
+
+Any external instance can be routed through its own **SOCKS5/HTTP proxy** by
+setting `<INSTANCE>_PROXY` — useful for clean egress past IP-based blocks (e.g.
+Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `SERPER_PROXY`,
+`JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`. Internal
+instances (`searxng`, `crawl4ai`, `trafilatura`) have no proxy.
+
+The value is passed straight to httpx; `socks5://host:port` does **proxy-side
+DNS** (the target hostname is resolved by the proxy, like `curl
+--socks5-hostname`), and `socks5h://` / `http://host:port` are also accepted.
+Unset → that instance goes direct. The pipeline keeps one pooled httpx client
+per distinct proxy URL (and one direct client), selected per instance, so
+proxied and direct providers run side by side. Needs the `socks` extra
+(`httpx[socks]`, already pinned).
+
 ## Logging
 
 Besides stderr (captured by Docker's rotation-capped json-file driver), the

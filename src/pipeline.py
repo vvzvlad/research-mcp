@@ -69,6 +69,9 @@ def _resolve_instance(inst: Instance) -> ProviderConfig | None:
     url = os.getenv(inst.url_env) if inst.url_env else None
     token = os.getenv(inst.token_env) if inst.token_env else None
     api_key = os.getenv(inst.api_key_env) if inst.api_key_env else None
+    # Proxy is always optional: unset → direct egress (no instance is disabled
+    # for a missing proxy var).
+    proxy = os.getenv(inst.proxy_env) if inst.proxy_env else None
 
     if inst.url_env and not url:
         return None
@@ -77,7 +80,54 @@ def _resolve_instance(inst: Instance) -> ProviderConfig | None:
     if inst.api_key_env and not api_key and not inst.optional_api_key:
         return None
 
-    return ProviderConfig(name=inst.name, url=url, token=token, api_key=api_key)
+    return ProviderConfig(name=inst.name, url=url, token=token, api_key=api_key, proxy=proxy)
+
+
+class ClientManager:
+    """Lazily creates and caches one ``httpx.AsyncClient`` per proxy URL.
+
+    Key = proxy URL string, with ``None`` for direct (no-proxy) egress. Clients
+    are created lazily inside the running event loop and recreated if a previous
+    one was closed (e.g. a premature lifespan shutdown), so the facade never
+    serves "client has been closed" across sessions/requests. Reusing one client
+    per proxy keeps connection pools warm instead of spawning a client per call.
+    """
+
+    def __init__(
+        self,
+        request_timeout: float,
+        direct_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._request_timeout = request_timeout
+        # The direct (None-proxy) client may be injected (tests pass one so respx
+        # can intercept it); proxied clients are always created on demand.
+        self._clients: dict[str | None, httpx.AsyncClient] = {}
+        if direct_client is not None:
+            self._clients[None] = direct_client
+
+    def client_for(self, proxy: str | None) -> httpx.AsyncClient:
+        """Return the client bound to ``proxy`` (None = direct), creating it lazily.
+
+        A ``socks5://`` / ``socks5h://`` / ``http://`` URL is passed straight to
+        httpx; with socksio installed, ``socks5://`` already resolves the target
+        hostname remotely (proxy-side DNS), like ``curl --socks5-hostname``.
+        """
+        client = self._clients.get(proxy)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
+                timeout=self._request_timeout,
+                follow_redirects=True,
+                proxy=proxy,
+            )
+            self._clients[proxy] = client
+        return client
+
+    async def aclose(self) -> None:
+        """Close every open client."""
+        for client in self._clients.values():
+            if not client.is_closed:
+                await client.aclose()
+        self._clients.clear()
 
 
 class Pipeline:
@@ -93,22 +143,12 @@ class Pipeline:
         self._settings = settings
         self._search = search_instances
         self._read = read_instances
-        # Do NOT create the client eagerly: build() runs before the event loop
+        # Do NOT create clients eagerly: build() runs before the event loop
         # starts, and an httpx.AsyncClient created here would be bound to (and
-        # later closed by) the wrong loop/lifespan. It is created lazily inside
-        # the running loop by _ensure_client (an injected client is kept as-is).
-        self._client = client
-
-    def _ensure_client(self) -> httpx.AsyncClient:
-        # Create the client lazily inside the running event loop and recreate it
-        # if a previous one was closed (e.g. a premature lifespan shutdown), so the
-        # facade never serves "client has been closed" across sessions/requests.
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                timeout=self._settings.request_timeout,
-                follow_redirects=True,
-            )
-        return self._client
+        # later closed by) the wrong loop/lifespan. The manager creates them
+        # lazily inside the running loop. An injected client (tests) becomes the
+        # direct, no-proxy client so respx can intercept it.
+        self._clients = ClientManager(settings.request_timeout, direct_client=client)
 
     # -- construction -------------------------------------------------------
 
@@ -138,7 +178,10 @@ class Pipeline:
                 url=config.url,
                 api_key=config.api_key,
                 token=config.token,
+                proxy=config.proxy,
             )
+            if config.proxy:
+                logger.info("Provider instance '{}' routes via proxy", inst.name)
             try:
                 built[inst.name] = cls_impl(config)
             except Exception as exc:  # noqa: BLE001 — provider __init__ guard
@@ -165,9 +208,8 @@ class Pipeline:
         return cls(settings, search_instances, read_instances, client=client)  # type: ignore[arg-type]
 
     async def aclose(self) -> None:
-        """Close the shared httpx client if one is open."""
-        if self._client is not None and not self._client.is_closed:
-            await self._client.aclose()
+        """Close every per-proxy httpx client."""
+        await self._clients.aclose()
 
     @property
     def search_names(self) -> list[str]:
@@ -191,11 +233,12 @@ class Pipeline:
         # silently return nothing. (The server already does max(1, ...).)
         num_results = max(1, num_results)
         started = time.monotonic()
-        client = self._ensure_client()
 
         async def _one(provider: SearchProvider) -> tuple[str, list[SearchResult] | None]:
             # Returns (name, results) where results is None if the provider
-            # failed/crashed (so it is NOT counted as "really worked").
+            # failed/crashed (so it is NOT counted as "really worked"). Each
+            # provider uses the client bound to ITS proxy (None = direct).
+            client = self._clients.client_for(provider.proxy)
             try:
                 hits = await provider.search(client, query, num_results, page, language)
                 return provider.name, hits
@@ -244,14 +287,15 @@ class Pipeline:
         Raises ``ProviderError`` if every method fails.
         """
         started = time.monotonic()
-        client = self._ensure_client()
 
         def _ms() -> int:
             return int((time.monotonic() - started) * 1000)
 
         # 1) One probe GET decides the path. If it is a PDF, we are done; if it
         #    is HTML, reuse that body for the trafilatura step (no second GET).
-        pdf_text, probe_html = await self._probe(client, url)
+        #    The probe is a generic fetch + PDF/HTML detect, so it uses the
+        #    direct client (the proxied providers fetch with their own client).
+        pdf_text, probe_html = await self._probe(self._clients.client_for(None), url)
         if pdf_text is not None:
             logger.info("read url={} -> provider=pdf ok=true elapsed_ms={}", url, _ms())
             return pdf_text
@@ -262,7 +306,7 @@ class Pipeline:
         best_thin_name: str | None = None
         for provider in self._read:
             try:
-                content = await self._read_one(client, provider, url, probe_html)
+                content = await self._read_one(provider, url, probe_html)
             except ProviderError as exc:
                 errors.append(str(exc))
                 continue
@@ -294,25 +338,20 @@ class Pipeline:
         logger.warning("read url={} -> all providers failed elapsed_ms={}", url, _ms())
         raise ProviderError("Не удалось прочитать страницу. " + "; ".join(errors))
 
-    async def _read_one(
-        self,
-        client: httpx.AsyncClient,
-        provider: ReadProvider,
-        url: str,
-        probe_html: str | None,
-    ) -> str:
+    async def _read_one(self, provider: ReadProvider, url: str, probe_html: str | None) -> str:
         """Run one read provider, reusing the probe body for trafilatura.
 
         trafilatura is a pure HTML→Markdown extractor, so when the probe already
         downloaded the page we extract from that body instead of GETting it
-        again (read_page is a hot path). All other providers fetch as usual.
+        again (read_page is a hot path). All other providers fetch with the
+        client bound to THEIR proxy (None = direct).
         """
         if probe_html is not None and isinstance(provider, TrafilaturaRead):
             content = extract_markdown(probe_html)
             if not content:
                 raise ProviderError(f"{provider.name}: no main content extracted")
             return content
-        return await provider.read(client, url)
+        return await provider.read(self._clients.client_for(provider.proxy), url)
 
     async def _probe(self, client: httpx.AsyncClient, url: str) -> tuple[str | None, str | None]:
         """Fetch ``url`` once and classify it.

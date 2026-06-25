@@ -39,6 +39,12 @@ def _clear_provider_env(monkeypatch):
         "TAVILY_1_API_KEY",
         "TAVILY_2_API_KEY",
         "FIRECRAWL_API_KEY",
+        "SERPER_PROXY",
+        "EXA_PROXY",
+        "JINA_PROXY",
+        "TAVILY_1_PROXY",
+        "TAVILY_2_PROXY",
+        "FIRECRAWL_PROXY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -398,3 +404,30 @@ async def test_read_pdf_logs_provider_pdf(monkeypatch, settings, capture_logs):
     assert line is not None
     assert "provider=pdf" in line
     assert "ok=true" in line
+
+
+# -- per-instance proxy ----------------------------------------------------
+
+
+@respx.mock
+async def test_proxied_provider_still_serves(monkeypatch, settings):
+    # A provider configured with a proxy uses a (separate) proxied client; respx
+    # intercepts above the SOCKS transport, so the request still succeeds.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("EXA_API_KEY", "k")
+    monkeypatch.setenv("EXA_PROXY", "socks5://internal.lc:1080")
+    respx.post("https://api.exa.ai/search").mock(
+        return_value=httpx.Response(
+            200, json={"results": [{"url": "https://e.test", "title": "Exa via proxy"}]}
+        )
+    )
+    pipe = Pipeline.build(settings)
+    try:
+        results = await pipe.search("q", num_results=5, page=1, language=None)
+        assert any(r.url == "https://e.test" for r in results)
+        # The proxied exa client is distinct from the direct client.
+        proxied = pipe._clients.client_for("socks5://internal.lc:1080")
+        direct = pipe._clients.client_for(None)
+        assert proxied is not direct
+    finally:
+        await pipe.aclose()

@@ -24,7 +24,8 @@ a volume across restarts/image updates).
   crawl4ai/tavily/firecrawl (read).
 - `src/providers/pdf.py` — PDF detection + pypdf extraction (used by the pipeline, not a tool).
 - `src/pipeline_config.py` — `INSTANCES`, `SEARCH_PIPELINE`, `READ_PIPELINE`.
-- `src/pipeline.py` — instance loader + search (merge/dedup) and read (fallback) logic.
+- `src/pipeline.py` — instance loader, `ClientManager` (one httpx client per
+  proxy URL), search (merge/dedup) and read (fallback) logic.
 - `src/settings.py` — non-secret knobs only (all defaulted), incl. log file config.
 - `src/server.py` — `build_server()` with the 3 `@mcp.tool` definitions.
 - `main.py` — thin entry point: stderr + persistent file sink, build server, run streamable-http.
@@ -36,7 +37,19 @@ a volume across restarts/image updates).
   retention; survives restart/image update via the `data/` volume).
 - `pipeline.search` / `pipeline.read` emit one per-request line each (tool,
   target url/query, winning provider/tier or `pdf`, count, latency, ok);
-  `read_pages` adds a `count/ok` summary. Never log bodies or secrets.
+  `read_pages` adds a `count/ok` summary. Never log bodies or secrets (proxy
+  URLs and keys are never logged).
+
+## Proxy (per instance)
+- An external instance can route through a SOCKS5/HTTP proxy via `<INSTANCE>_PROXY`
+  (`EXA_PROXY`, `SERPER_PROXY`, `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`,
+  `FIRECRAWL_PROXY`); internal instances (searxng/crawl4ai/trafilatura) have none.
+- `Instance.proxy_env` holds the ENV var NAME (never a value); the loader resolves
+  it into `ProviderConfig.proxy`, exposed as `provider.proxy`.
+- `ClientManager.client_for(proxy)` lazily creates/caches one httpx client per
+  proxy URL (None = direct), self-healing if closed; the pipeline picks each
+  provider's client by its proxy. `socks5://` does proxy-side DNS. Needs
+  `httpx[socks]`.
 
 ## Setup / test / run
 ```bash

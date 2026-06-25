@@ -23,6 +23,7 @@ class Crawl4aiRead:
         if not config.token:
             raise ValueError("crawl4ai requires a token")
         self.name = config.name
+        self.proxy = config.proxy
         self._base = config.url.rstrip("/")
         self._config = config
 

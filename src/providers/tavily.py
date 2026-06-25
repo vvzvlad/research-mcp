@@ -26,6 +26,7 @@ class TavilyRead:
         if not config.api_key:
             raise ValueError("tavily requires an api_key")
         self.name = config.name
+        self.proxy = config.proxy
         self._config = config
 
     async def read(self, client: httpx.AsyncClient, url: str) -> str:

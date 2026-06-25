@@ -43,6 +43,7 @@ class TrafilaturaRead:
 
     def __init__(self, config: ProviderConfig) -> None:
         self.name = config.name
+        self.proxy = config.proxy
         self._config = config
 
     async def read(self, client: httpx.AsyncClient, url: str) -> str:

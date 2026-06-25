@@ -23,6 +23,7 @@ class SearxngSearch:
         if not config.url:
             raise ValueError("searxng requires a url")
         self.name = config.name
+        self.proxy = config.proxy
         self._base = config.url.rstrip("/")
         self._config = config
 
