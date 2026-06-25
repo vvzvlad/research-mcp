@@ -21,6 +21,13 @@ class Settings(BaseSettings):
 
     # --- Behaviour knobs -----------------------------------------------------
     log_level: str = "INFO"
+    # Persistent log file (under data/ — survives restarts/image updates via the
+    # mounted volume). Docker's json-file driver is rotation-capped, so a real
+    # file is kept here for long-term, per-request log lines.
+    log_file: str = "data/research-mcp.log"
+    # loguru rotation/retention for the file sink (size trigger, age cutoff).
+    log_rotation: str = "20 MB"
+    log_retention: str = "14 days"
     # httpx request timeout in seconds for all outbound HTTP calls.
     request_timeout: float = 25.0
     # Read content shorter than this is "thin" → try the next read provider.

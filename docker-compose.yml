@@ -1,12 +1,16 @@
 # Deploy template. Pull the prebuilt image from ghcr.io — do NOT build on prod.
 # Values below are PLACEHOLDERS (XXX), not real secrets.
 #
-# WEB-SERVICE variant (published via Traefik + basicAuth). The facade is
-# stateless, so there is NO volume. Auth is enforced by Traefik, not the app.
+# WEB-SERVICE variant (published via Traefik + basicAuth). Auth is enforced by
+# Traefik, not the app. The only persistent state is the log file under
+# /app/data, kept on a named volume so it survives restarts and image updates.
 #
 # Provider instances are enabled by which env vars are set. Set at least one
 # search (SEARXNG_URL / SERPER_API_KEY / EXA_API_KEY) and rely on trafilatura +
 # any read providers you configure. Leave a var out to disable that instance.
+
+volumes:
+  research_mcp_data:
 
 networks:
   docker_main_net:
@@ -17,6 +21,8 @@ services:
     image: ghcr.io/vvzvlad/research-mcp:latest
     container_name: research-mcp
     restart: always
+    volumes:
+      - research_mcp_data:/app/data    # persistent log file survives restart/update
     environment:
       # --- search (need >= 1) ---
       SEARXNG_URL: XXX            # e.g. http://searxng:8080

@@ -12,5 +12,8 @@ __pycache__/
 .DS_Store
 logs/
 .pytest_cache/
+# Runtime state (persistent log file etc.) — keep the dir, ignore contents
+data/*
+!data/.gitkeep
 # Claude Code agent worktrees — never commit
 .claude/worktrees/

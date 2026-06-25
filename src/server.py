@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from loguru import logger
 from mcp.server.fastmcp import FastMCP
 
 from src.formatting import format_search_results
@@ -135,6 +136,11 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
                 except Exception as exc:  # noqa: BLE001 — never break the batch
                     return {"url": url, "ok": False, "error": f"Непредвиденная ошибка: {exc}"}
 
-        return await asyncio.gather(*(_one(url) for url in capped))
+        results = await asyncio.gather(*(_one(url) for url in capped))
+        # Per-url lines are emitted by pipeline.read; add one batch summary line.
+        # (read already logs each url's winning provider/latency individually.)
+        ok_count = sum(1 for r in results if r["ok"])
+        logger.info("read_pages count={} ok={}", len(capped), ok_count)
+        return results
 
     return mcp

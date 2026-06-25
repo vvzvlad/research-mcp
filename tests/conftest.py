@@ -8,9 +8,25 @@ vars explicitly (usually via monkeypatch) to choose which instances are enabled.
 from __future__ import annotations
 
 import pytest
+from loguru import logger
 
 from src.providers.base import ProviderConfig
 from src.settings import Settings
+
+
+@pytest.fixture
+def capture_logs():
+    """Capture loguru messages into a list of formatted strings for the test.
+
+    pytest's ``caplog`` does not see loguru records (separate logging stack), so
+    we attach a temporary sink and remove it afterwards.
+    """
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, level="DEBUG", format="{message}")
+    try:
+        yield messages
+    finally:
+        logger.remove(sink_id)
 
 
 @pytest.fixture

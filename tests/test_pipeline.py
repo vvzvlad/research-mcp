@@ -303,3 +303,66 @@ async def test_transient_retry_then_success(monkeypatch, settings):
         await pipe.aclose()
     assert any(r.url == "https://ok.test" for r in results)
     assert route.call_count == 2
+
+
+# -- per-request logging ---------------------------------------------------
+
+
+@respx.mock
+async def test_search_emits_per_request_log(monkeypatch, settings, capture_logs):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(
+            200, json={"results": [{"url": "https://ok.test", "title": "OK", "content": "s"}]}
+        )
+    )
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.search("hello world", num_results=5, page=1, language=None)
+    finally:
+        await pipe.aclose()
+    line = next((m for m in capture_logs if m.startswith("search query=")), None)
+    assert line is not None
+    assert "'searxng'" in line  # the provider that really ran
+    assert "results=1" in line
+    assert "elapsed_ms=" in line
+
+
+@respx.mock
+async def test_read_emits_per_request_log(monkeypatch, settings, capture_logs):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    url = "https://good.test/article"
+    respx.get(url).mock(return_value=httpx.Response(200, text=ARTICLE_HTML))
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    line = next((m for m in capture_logs if m.startswith("read url=")), None)
+    assert line is not None
+    assert "provider=trafilatura" in line
+    assert "ok=true" in line
+    assert "elapsed_ms=" in line
+
+
+@respx.mock
+async def test_read_pdf_logs_provider_pdf(monkeypatch, settings, capture_logs):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    url = "https://files.test/doc.pdf"
+    respx.get(url).mock(
+        return_value=httpx.Response(
+            200, content=SAMPLE_PDF, headers={"Content-Type": "application/pdf"}
+        )
+    )
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    line = next((m for m in capture_logs if m.startswith("read url=")), None)
+    assert line is not None
+    assert "provider=pdf" in line
+    assert "ok=true" in line

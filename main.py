@@ -16,6 +16,18 @@ from src.settings import settings
 def main() -> None:
     logger.remove()
     logger.add(sys.stderr, level=settings.log_level)
+    # Persistent file sink on the data/ volume: long-term, per-request log lines
+    # that survive container restarts and image updates. enqueue=True keeps the
+    # async hot path from blocking on disk I/O.
+    logger.add(
+        settings.log_file,
+        level=settings.log_level,
+        rotation=settings.log_rotation,
+        retention=settings.log_retention,
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+    )
     logger.info(
         "Starting research-mcp on {host}:{port}/mcp (streamable-http)",
         host=settings.mcp_host,

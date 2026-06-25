@@ -8,7 +8,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Code (stateless service — no data/ or templates/)
+# Runtime state directory (persistent log file lives here; mounted as a volume)
+RUN mkdir -p data
+
+# Code
 COPY src/ src/
 COPY main.py .
 

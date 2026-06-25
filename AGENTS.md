@@ -1,9 +1,10 @@
 # Agent Instructions — research-mcp
 
-A stateless MCP "facade" that hides a pyramid of search/read providers behind a
-single streamable-http MCP endpoint and exposes **3 clean tools** with good
-Russian help texts. No auth in the app: Traefik + basicAuth on the host handles
-it. The service is stateless — no `data/`, no volume.
+An MCP "facade" that hides a pyramid of search/read providers behind a single
+streamable-http MCP endpoint and exposes **3 clean tools** with good Russian help
+texts. No auth in the app: Traefik + basicAuth on the host handles it. No
+application state — the only thing persisted is a log file under `data/` (kept on
+a volume across restarts/image updates).
 
 ## Plugin architecture (types + instances)
 - A **type** is an implementation class (`src/providers/<type>.py`), registered
@@ -24,10 +25,18 @@ it. The service is stateless — no `data/`, no volume.
 - `src/providers/pdf.py` — PDF detection + pypdf extraction (used by the pipeline, not a tool).
 - `src/pipeline_config.py` — `INSTANCES`, `SEARCH_PIPELINE`, `READ_PIPELINE`.
 - `src/pipeline.py` — instance loader + search (merge/dedup) and read (fallback) logic.
-- `src/settings.py` — non-secret knobs only (all defaulted).
+- `src/settings.py` — non-secret knobs only (all defaulted), incl. log file config.
 - `src/server.py` — `build_server()` with the 3 `@mcp.tool` definitions.
-- `main.py` — thin entry point: build server, run streamable-http.
+- `main.py` — thin entry point: stderr + persistent file sink, build server, run streamable-http.
+- `data/` — runtime state (persistent log file; gitignored, mounted as a volume).
 - `tests/` — pytest (network mocked with respx).
+
+## Logging
+- stderr + a persistent file sink at `data/research-mcp.log` (loguru rotation +
+  retention; survives restart/image update via the `data/` volume).
+- `pipeline.search` / `pipeline.read` emit one per-request line each (tool,
+  target url/query, winning provider/tier or `pdf`, count, latency, ok);
+  `read_pages` adds a `count/ok` summary. Never log bodies or secrets.
 
 ## Setup / test / run
 ```bash
@@ -51,7 +60,8 @@ make run               # serve streamable-http on MCP_HOST:MCP_PORT, endpoint /m
   code, git, or `.env.example` (placeholders only); secrets live only in `.env` /
   prod `environment:`.
 - Provider secrets are NOT Settings fields — read by name in the loader.
-- Stateless: no mutable state, no `data/`, no volume.
+- The only runtime state is the log file under `data/` (golden rule: mutable
+  state lives in `data/`, which is gitignored and a docker volume).
 - All repeated actions go through `make` targets; Python runs from `.venv`.
 - Tests are required for new code; in CI `build` depends on `test`.
 - No `EXPOSE` in the Dockerfile — Traefik publishes via compose labels.

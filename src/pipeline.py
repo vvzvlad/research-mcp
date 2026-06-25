@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -176,31 +177,50 @@ class Pipeline:
         # Defend the public method too: a non-positive count would otherwise
         # silently return nothing. (The server already does max(1, ...).)
         num_results = max(1, num_results)
+        started = time.monotonic()
 
-        async def _one(provider: SearchProvider) -> list[SearchResult]:
+        async def _one(provider: SearchProvider) -> tuple[str, list[SearchResult] | None]:
+            # Returns (name, results) where results is None if the provider
+            # failed/crashed (so it is NOT counted as "really worked").
             try:
-                return await provider.search(self._client, query, num_results, page, language)
+                hits = await provider.search(self._client, query, num_results, page, language)
+                return provider.name, hits
             except ProviderError as exc:
                 logger.info("search '{}' failed: {}", provider.name, exc)
-                return []
+                return provider.name, None
             except Exception as exc:  # noqa: BLE001 — never break the merge
                 logger.warning("search '{}' crashed: {}", provider.name, exc)
-                return []
+                return provider.name, None
 
         # Gather in pipeline order; results keep that order so dedup prefers the
         # earlier (higher-priority) provider.
         batches = await asyncio.gather(*(_one(p) for p in self._search))
 
+        used: list[str] = []
         merged: list[SearchResult] = []
         seen: set[str] = set()
-        for batch in batches:
-            for result in batch:
+        for name, hits in batches:
+            if hits is None:
+                continue
+            used.append(name)
+            for result in hits:
                 key = _normalize_url(result.url)
                 if key in seen:
                     continue
                 seen.add(key)
                 merged.append(result)
-        return merged[:num_results]
+        merged = merged[:num_results]
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        # One per-request line for the persistent log (no bodies/secrets).
+        logger.info(
+            "search query={!r} providers={} results={} elapsed_ms={}",
+            query,
+            used,
+            len(merged),
+            elapsed_ms,
+        )
+        return merged
 
     # -- read ---------------------------------------------------------------
 
@@ -209,15 +229,22 @@ class Pipeline:
 
         Raises ``ProviderError`` if every method fails.
         """
+        started = time.monotonic()
+
+        def _ms() -> int:
+            return int((time.monotonic() - started) * 1000)
+
         # 1) One probe GET decides the path. If it is a PDF, we are done; if it
         #    is HTML, reuse that body for the trafilatura step (no second GET).
         pdf_text, probe_html = await self._probe(url)
         if pdf_text is not None:
+            logger.info("read url={} -> provider=pdf ok=true elapsed_ms={}", url, _ms())
             return pdf_text
 
         # 2) HTML path: walk the read pipeline until one yields enough content.
         errors: list[str] = []
         best_thin: str | None = None
+        best_thin_name: str | None = None
         for provider in self._read:
             try:
                 content = await self._read_one(provider, url, probe_html)
@@ -228,14 +255,28 @@ class Pipeline:
                 errors.append(f"{provider.name}: {exc}")
                 continue
             if len(content) >= self._settings.fallback_min_chars:
+                logger.info(
+                    "read url={} -> provider={} ok=true elapsed_ms={}",
+                    url,
+                    provider.name,
+                    _ms(),
+                )
                 return content
             # Too thin — remember the longest thin result as a last resort.
             if best_thin is None or len(content) > len(best_thin):
                 best_thin = content
+                best_thin_name = provider.name
             errors.append(f"{provider.name}: content too thin ({len(content)} chars)")
 
         if best_thin:
+            logger.info(
+                "read url={} -> provider={} ok=true elapsed_ms={} (thin fallback)",
+                url,
+                best_thin_name,
+                _ms(),
+            )
             return best_thin
+        logger.warning("read url={} -> all providers failed elapsed_ms={}", url, _ms())
         raise ProviderError("Не удалось прочитать страницу. " + "; ".join(errors))
 
     async def _read_one(self, provider: ReadProvider, url: str, probe_html: str | None) -> str:

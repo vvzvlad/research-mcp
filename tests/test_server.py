@@ -113,3 +113,12 @@ async def test_read_pages_respects_hard_limit(settings):
     assert f"https://a.test/{READ_PAGES_MAX - 1}" in processed
     # The 21st and 22nd urls are dropped.
     assert f"https://a.test/{READ_PAGES_MAX}" not in processed
+
+
+async def test_read_pages_emits_summary_log(settings, capture_logs):
+    srv = build_server(settings, pipeline=FakePipeline())
+    await _call(srv, "read_pages", {"urls": ["https://a.test", "https://boom.test"]})
+    line = next((m for m in capture_logs if m.startswith("read_pages count=")), None)
+    assert line is not None
+    assert "count=2" in line
+    assert "ok=1" in line  # one good url, one boom (error)

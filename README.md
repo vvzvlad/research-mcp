@@ -6,7 +6,8 @@ Russian help texts. An LLM gets a simple "search → read" toolset; behind it,
 several providers are tried, merged, and failed over automatically.
 
 The app does **no authentication** — it is published through Traefik + basicAuth
-on the host. It is stateless: no database, no volume.
+on the host. It holds no application state: the only thing persisted is a log
+file under `data/` (kept on a volume).
 
 ## Tools
 
@@ -72,19 +73,33 @@ make run                    # run the server (streamable-http on MCP_HOST:MCP_PO
 All config comes from ENV / `.env` (see `.env.example`). Provider secrets/URLs
 are read by **name** in the instance loader, not declared as Settings fields. The
 non-secret knobs (all defaulted): `MCP_HOST`, `MCP_PORT`, `LOG_LEVEL`,
-`REQUEST_TIMEOUT`, `FALLBACK_MIN_CHARS`, `READ_PAGES_CONCURRENCY`, `RETRIES`.
-The `read_pages` per-call url cap is a fixed `20` (hard constant, matching the
-tool description) — not configurable.
+`LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `REQUEST_TIMEOUT`,
+`FALLBACK_MIN_CHARS`, `READ_PAGES_CONCURRENCY`, `RETRIES`. The `read_pages`
+per-call url cap is a fixed `20` (hard constant, matching the tool description) —
+not configurable.
 
 Provider env vars: `SEARXNG_URL`, `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`
 (optional), `CRAWL4AI_URL` + `CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`,
 `TAVILY_2_API_KEY`, `FIRECRAWL_API_KEY`.
 
+## Logging
+
+Besides stderr (captured by Docker's rotation-capped json-file driver), the
+server writes a **persistent log file** to `data/research-mcp.log` (default;
+`LOG_ROTATION=20 MB`, `LOG_RETENTION=14 days`). It lives on the `data/` volume,
+so it survives container restarts and image updates. The file carries one
+**per-request line** per tool call — search (`query`, which provider instances
+actually ran, result count, latency) and read (`url`, the winning provider/tier
+or `pdf`, `ok`, latency), plus a `read_pages count=N ok=K` summary — making it
+useful for analyzing how requests distribute across provider tiers. No request
+bodies or secrets are logged, only urls/queries, provider names, counts, timings.
+
 ## Deployment
 
 CI builds the image and pushes it to `ghcr.io` (`test` → `build`, tags `latest` +
 `sha`). On prod we pull the prebuilt image via `docker-compose.yml` (behind
-Traefik + basicAuth, watchtower auto-updates `latest`) — we never build on prod.
+Traefik + basicAuth, watchtower auto-updates `latest`; the `data/` volume keeps
+the log file across updates) — we never build on prod.
 
 ## Layout
 
