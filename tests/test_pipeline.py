@@ -167,6 +167,38 @@ async def test_read_html_uses_single_get(monkeypatch, settings):
     assert route.call_count == 1  # NOT fetched twice
 
 
+# -- lazy self-healing client (regression: "client has been closed") -------
+
+
+@respx.mock
+async def test_read_recreates_client_after_aclose(monkeypatch, settings):
+    # Regression for the prod bug: a premature aclose() (e.g. a streamable-http
+    # lifespan shutdown) must NOT poison later requests with
+    # "Cannot send a request, as the client has been closed.". We do NOT inject a
+    # client here so the pipeline owns it and we exercise lazy recreation. respx
+    # patches the httpx transport globally, so the recreated real client is also
+    # intercepted.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    url = "https://good.test/article"
+    respx.get(url).mock(return_value=httpx.Response(200, text=ARTICLE_HTML))
+
+    pipe = Pipeline.build(settings)  # no injected client → pipeline creates it
+
+    first = await pipe.read(url)
+    assert "main article body" in first
+
+    # Simulate the premature lifespan shutdown that closed the shared client.
+    await pipe.aclose()
+
+    # Same call again must succeed via a recreated client, not raise the
+    # "client has been closed" error.
+    second = await pipe.read(url)
+    assert "main article body" in second
+
+    await pipe.aclose()
+
+
 # -- read fallback chain ---------------------------------------------------
 
 

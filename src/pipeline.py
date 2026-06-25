@@ -93,10 +93,22 @@ class Pipeline:
         self._settings = settings
         self._search = search_instances
         self._read = read_instances
-        self._client = client or httpx.AsyncClient(
-            timeout=settings.request_timeout,
-            follow_redirects=True,
-        )
+        # Do NOT create the client eagerly: build() runs before the event loop
+        # starts, and an httpx.AsyncClient created here would be bound to (and
+        # later closed by) the wrong loop/lifespan. It is created lazily inside
+        # the running loop by _ensure_client (an injected client is kept as-is).
+        self._client = client
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        # Create the client lazily inside the running event loop and recreate it
+        # if a previous one was closed (e.g. a premature lifespan shutdown), so the
+        # facade never serves "client has been closed" across sessions/requests.
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=self._settings.request_timeout,
+                follow_redirects=True,
+            )
+        return self._client
 
     # -- construction -------------------------------------------------------
 
@@ -153,8 +165,9 @@ class Pipeline:
         return cls(settings, search_instances, read_instances, client=client)  # type: ignore[arg-type]
 
     async def aclose(self) -> None:
-        """Close the shared httpx client."""
-        await self._client.aclose()
+        """Close the shared httpx client if one is open."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
 
     @property
     def search_names(self) -> list[str]:
@@ -178,12 +191,13 @@ class Pipeline:
         # silently return nothing. (The server already does max(1, ...).)
         num_results = max(1, num_results)
         started = time.monotonic()
+        client = self._ensure_client()
 
         async def _one(provider: SearchProvider) -> tuple[str, list[SearchResult] | None]:
             # Returns (name, results) where results is None if the provider
             # failed/crashed (so it is NOT counted as "really worked").
             try:
-                hits = await provider.search(self._client, query, num_results, page, language)
+                hits = await provider.search(client, query, num_results, page, language)
                 return provider.name, hits
             except ProviderError as exc:
                 logger.info("search '{}' failed: {}", provider.name, exc)
@@ -230,13 +244,14 @@ class Pipeline:
         Raises ``ProviderError`` if every method fails.
         """
         started = time.monotonic()
+        client = self._ensure_client()
 
         def _ms() -> int:
             return int((time.monotonic() - started) * 1000)
 
         # 1) One probe GET decides the path. If it is a PDF, we are done; if it
         #    is HTML, reuse that body for the trafilatura step (no second GET).
-        pdf_text, probe_html = await self._probe(url)
+        pdf_text, probe_html = await self._probe(client, url)
         if pdf_text is not None:
             logger.info("read url={} -> provider=pdf ok=true elapsed_ms={}", url, _ms())
             return pdf_text
@@ -247,7 +262,7 @@ class Pipeline:
         best_thin_name: str | None = None
         for provider in self._read:
             try:
-                content = await self._read_one(provider, url, probe_html)
+                content = await self._read_one(client, provider, url, probe_html)
             except ProviderError as exc:
                 errors.append(str(exc))
                 continue
@@ -279,7 +294,13 @@ class Pipeline:
         logger.warning("read url={} -> all providers failed elapsed_ms={}", url, _ms())
         raise ProviderError("Не удалось прочитать страницу. " + "; ".join(errors))
 
-    async def _read_one(self, provider: ReadProvider, url: str, probe_html: str | None) -> str:
+    async def _read_one(
+        self,
+        client: httpx.AsyncClient,
+        provider: ReadProvider,
+        url: str,
+        probe_html: str | None,
+    ) -> str:
         """Run one read provider, reusing the probe body for trafilatura.
 
         trafilatura is a pure HTML→Markdown extractor, so when the probe already
@@ -291,9 +312,9 @@ class Pipeline:
             if not content:
                 raise ProviderError(f"{provider.name}: no main content extracted")
             return content
-        return await provider.read(self._client, url)
+        return await provider.read(client, url)
 
-    async def _probe(self, url: str) -> tuple[str | None, str | None]:
+    async def _probe(self, client: httpx.AsyncClient, url: str) -> tuple[str | None, str | None]:
         """Fetch ``url`` once and classify it.
 
         Returns ``(pdf_text, html)``:
@@ -305,7 +326,7 @@ class Pipeline:
         """
         suffix_pdf = url.split("?", 1)[0].rstrip().lower().endswith(".pdf")
         try:
-            response = await self._client.get(
+            response = await client.get(
                 url, headers={"User-Agent": BROWSER_USER_AGENT}
             )
             response.raise_for_status()
