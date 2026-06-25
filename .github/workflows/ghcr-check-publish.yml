@@ -33,6 +33,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: test                          # no green tests → no image is built
+    # Publish the image only on main / manual dispatch, never on PRs: PR builds
+    # would clobber :latest with the PR branch's code. PRs still run tests above.
+    if: github.event_name != 'pull_request'
     steps:
     - uses: actions/checkout@v4
 
