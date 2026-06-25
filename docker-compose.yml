@@ -1,0 +1,51 @@
+# Deploy template. Pull the prebuilt image from ghcr.io — do NOT build on prod.
+# Values below are PLACEHOLDERS (XXX), not real secrets.
+#
+# WEB-SERVICE variant (published via Traefik + basicAuth). The facade is
+# stateless, so there is NO volume. Auth is enforced by Traefik, not the app.
+#
+# Provider instances are enabled by which env vars are set. Set at least one
+# search (SEARXNG_URL / SERPER_API_KEY / EXA_API_KEY) and rely on trafilatura +
+# any read providers you configure. Leave a var out to disable that instance.
+
+networks:
+  docker_main_net:
+    external: true
+
+services:
+  research_mcp:
+    image: ghcr.io/vvzvlad/research-mcp:latest
+    container_name: research-mcp
+    restart: always
+    environment:
+      # --- search (need >= 1) ---
+      SEARXNG_URL: XXX            # e.g. http://searxng:8080
+      SERPER_API_KEY: XXX        # optional
+      EXA_API_KEY: XXX           # optional
+      # --- read (trafilatura is always on; these are optional extras) ---
+      JINA_API_KEY: XXX          # optional (Jina works keyless too)
+      CRAWL4AI_URL: XXX          # optional, e.g. http://crawl4ai:11235
+      CRAWL4AI_TOKEN: XXX        # required IF CRAWL4AI_URL is set
+      TAVILY_1_API_KEY: XXX      # optional (primary)
+      TAVILY_2_API_KEY: XXX      # optional (failover)
+      FIRECRAWL_API_KEY: XXX     # optional
+      TZ: Europe/Moscow
+    networks:
+      - docker_main_net
+    logging:
+      driver: "json-file"
+      options:
+        max-file: 5
+        max-size: 10m
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.research.rule: Host(`research.example.com`)
+      traefik.http.services.research.loadBalancer.server.port: 8000
+      traefik.http.routers.research.entrypoints: websecure
+      traefik.http.routers.research.tls: "true"
+      traefik.http.routers.research.tls.certresolver: letsEncrypt
+      # basicAuth (reference): create a middleware and attach it to this router so
+      # the public MCP endpoint is protected (the app itself does no auth).
+      #   traefik.http.middlewares.research-auth.basicauth.users: "user:$$apr1$$..."
+      #   traefik.http.routers.research.middlewares: research-auth
+      com.centurylinklabs.watchtower.enable: "true"   # auto-update the image
