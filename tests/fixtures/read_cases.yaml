@@ -1,0 +1,188 @@
+# Read-engine benchmark cases: real pages that stress the read pipeline.
+#
+# Collected from production tool-failure reports (thermocouple research,
+# 2026-06) plus latency cases seen in the request log. This is a MANUAL /
+# opt-in benchmark, intentionally NOT wired into CI: the URLs are live,
+# several sit behind Cloudflare / paywalls, and network conditions make them
+# non-deterministic. Use it to sanity-check read_page / read_pages by hand (or
+# from a throwaway script) and to remember which pages are known-hard and why.
+#
+# Field legend (English keys; human descriptions in Russian on purpose):
+#   id        stable short identifier
+#   url       page to fetch via read_page / read_pages (null = exact URL not
+#             captured in the report; fill in before using the case)
+#   type      html | pdf
+#   category  failure class:
+#               cloudflare-captcha  bot wall / Turnstile, content never served
+#               paywall-403         publisher returns 403 to bots
+#               pdf-ssl             PDF host with a broken TLS cert chain
+#               pdf-403             PDF returns 403 on direct fetch
+#               pdf-empty           PDF fetch returns an empty body
+#               js-rendered         main content is injected by JS
+#               nav-noise           heavy nav/footer boilerplate around content
+#               slow-deep-fallback  reads, but only after the deep paid tiers
+#               control-clean       positive baseline; must extract cleanly
+#   status    unavoidable | fixed:A | fixed:B | fixed:C | limitation | perf | control
+#             (A = PDF probe-failure fallback, B = TLS verify-off retry,
+#              C = trafilatura favor_precision — see PR #2)
+#   problem   что именно ломается (RU)
+#   expect    ожидаемое поведение после PR #2 (RU)
+
+cases:
+  # --- bot walls / paywalls: unavoidable, the engine must fail cleanly --------
+  - id: wiley-thermocouple-insulation
+    url: null   # onlinelibrary.wiley.com — статья о влиянии пробоя изоляции на точность термопар (2024)
+    type: html
+    category: cloudflare-captcha
+    status: unavoidable
+    problem: Cloudflare CAPTCHA — вместо статьи отдаётся challenge-страница.
+    expect: read_page возвращает ok=false; в логе строка FAILED ok=false с URL и tried=[...]. Никаких ложных «успехов» с текстом капчи.
+
+  - id: researchgate-thermocouple-1000c
+    url: null   # researchgate.net — статья о точности термопар выше 1000 °C
+    type: html
+    category: cloudflare-captcha
+    status: unavoidable
+    problem: Security check / CAPTCHA ResearchGate.
+    expect: ok=false, FAILED-строка в логе. Деградация чистая.
+
+  - id: control-com-forum-downward-spikes
+    url: null   # control.com (форум) — обсуждение скачков температуры вниз
+    type: html
+    category: cloudflare-captcha
+    status: unavoidable
+    problem: Cloudflare CAPTCHA на форуме control.com.
+    expect: ok=false, FAILED-строка.
+
+  - id: keysight-thermocouple-error-sources
+    url: https://docs.keysight.com/kkbopen/what-are-the-source-of-error-in-thermocouple-measurements-985405150.html
+    type: html
+    category: cloudflare-captcha
+    status: unavoidable
+    problem: Cloudflare CAPTCHA; crawl4ai сам предупреждает «This page maybe requiring CAPTCHA».
+    expect: ok=false, FAILED-строка. (Авторитетный источник — если когда-нибудь понадобится, только через ручной браузер.)
+
+  # --- PDFs that the direct probe could not fetch: fixed by A + B ------------
+  - id: omega-z021-032-reference
+    url: null   # mx.omega.com — классический справочник Omega Z-021-032 (PDF)
+    type: pdf
+    category: pdf-ssl
+    status: fixed:B
+    problem: SSL CERTIFICATE_VERIFY_FAILED — у хоста битая цепочка сертификата, прямая загрузка падала и PDF сразу фейлился.
+    expect: проба ретраит загрузку без проверки сертификата (warning «TLS verification failed» в логе) и извлекает текст через pypdf; если и это не вышло — уходит в провайдерскую цепочку (A).
+
+  - id: aip-roberts-kollie-1977
+    url: null   # pubs.aip.org — оригинальная статья Roberts & Kollie (1977), модель шунтирования (PDF)
+    type: pdf
+    category: pdf-403
+    status: fixed:A
+    problem: 403 Forbidden на PDF при прямой загрузке; раньше это был мгновенный фейл без фолбэка.
+    expect: больше не фейлится сразу — URL уходит в jina/tavily/firecrawl (серверная загрузка через прокси). Может всё равно не открыться (paywall издателя), но шанс есть, и провал логируется.
+
+  - id: jms-se-insulation-resistance
+    url: null   # jms-se.com — документ о влиянии R_изоляции (PDF)
+    type: pdf
+    category: pdf-empty
+    status: fixed:A
+    problem: Пустой ответ при загрузке PDF.
+    expect: при пустом/оборванном ответе PDF теперь уходит в провайдерскую цепочку, а не фейлится сразу.
+
+  # --- extraction quality: nav noise, fixed by C ----------------------------
+  - id: te-instrumentation-accuracy-classes
+    url: https://www.te-instrumentation.com/understanding-thermocouple-accuracy-classes/
+    type: html
+    category: nav-noise
+    status: fixed:C
+    problem: ~2 КБ полезной статьи погребены под ~15 КБ дублированной навигации (моб. меню + десктоп-меню + футер, 3-4 повтора).
+    expect: favor_precision выбрасывает навигационные блоки; в Markdown остаётся в основном тело статьи без повторяющихся меню.
+
+  - id: nanmac-thermocouple-article
+    url: null   # nanmac.com — статья по термопарам (точный URL в отчёте не зафиксирован)
+    type: html
+    category: nav-noise
+    status: fixed:C
+    problem: Перед статьёй простыня меню/ссылок/логотипов + полный список whitepapers и услуг с картинками.
+    expect: precision-режим срезает boilerplate; тело статьи читаемо и без списка услуг.
+
+  - id: okazaki-thermocouple-faq
+    url: null   # okazaki-mfg.com — статья/FAQ по термопарам (точный URL в отчёте не зафиксирован)
+    type: html
+    category: nav-noise
+    status: fixed:C
+    problem: Перед контентом дерево продуктов и список всех FAQ.
+    expect: precision-режим убирает дерево продуктов/FAQ-навигацию.
+
+  # --- JS-rendered: known limitation, may improve via crawl4ai --------------
+  - id: jumo-15-thermocouple-problems
+    url: https://www.jumo.group/nl/en/about-us/blog/thermocouple-errors
+    type: html
+    category: js-rendered
+    status: limitation
+    problem: Заявлен «15 Most common thermocouple problems», но извлеклось 2-3 предложения — основной контент подгружается JS.
+    expect: после C trafilatura отдаёт мало (<400 симв.) → пайплайн эскалирует на crawl4ai (headless-рендер JS), который может достать полную статью. Не гарантия — отметить факт извлечения и его полноту.
+
+  # --- deep-fallback latency: works, but slow (perf watch) ------------------
+  - id: firecrawl-blog-best-search-apis
+    url: https://www.firecrawl.dev/blog/best-web-search-apis
+    type: html
+    category: slow-deep-fallback
+    status: perf
+    problem: Бот-защита — trafilatura+jina+crawl4ai отвалились, дочитал только tavily (~127 с суммарно).
+    expect: контент извлекается, но медленно; кейс для контроля латентности глубокого фолбэка (per-tier таймауты).
+
+  - id: exa-blog-nextgen-search
+    url: https://exa.ai/blog/how-to-build-nextgen-search
+    type: html
+    category: slow-deep-fallback
+    status: perf
+    problem: То же — дочитал tavily за ~127 с.
+    expect: извлекается; следить за латентностью.
+
+  - id: perplexity-ai-first-search-api
+    url: https://research.perplexity.ai/articles/architecting-and-evaluating-an-ai-first-search-api
+    type: html
+    category: slow-deep-fallback
+    status: perf
+    problem: jina дочитала за ~79 с (тяжёлая страница).
+    expect: извлекается; следить за латентностью jina.
+
+  # --- positive controls: must stay clean (regression baseline) -------------
+  - id: temperatures-ru
+    url: null   # temperatures.ru — лучший русскоязычный источник по теме
+    type: html
+    category: control-clean
+    status: control
+    problem: Нет — эталон.
+    expect: чистый, полный текст. Если деградирует — регресс экстрактора.
+
+  - id: owen-ru-tables
+    url: null   # owen.ru — техданные с таблицами
+    type: html
+    category: control-clean
+    status: control
+    problem: Нет — эталон на таблицы.
+    expect: таблицы и техданные извлекаются (include_tables под favor_precision не должен их терять).
+
+  - id: wika-blog
+    url: null   # WIKA blog — чистый текст
+    type: html
+    category: control-clean
+    status: control
+    problem: Нет — эталон.
+    expect: чистый читаемый текст без шума.
+
+  - id: ht-heater-com
+    url: null   # ht-heater.com — практический контент
+    type: html
+    category: control-clean
+    status: control
+    problem: Нет — эталон.
+    expect: извлекается без проблем.
+
+  - id: thermocouplechina-com
+    url: null   # thermocouplechina.com — техтекст
+    type: html
+    category: control-clean
+    status: control
+    problem: Нет — эталон.
+    expect: качественный техтекст извлекается чисто.
