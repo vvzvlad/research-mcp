@@ -26,12 +26,16 @@ def extract_markdown(html: str) -> str:
     reuse an already-downloaded page body (the PDF-probe fetch) without GETting
     the same url a second time.
     """
+    # favor_precision keeps clean main content and drops nav/boilerplate (menus,
+    # footers, logos). The trade-off is under-extraction: when precision returns
+    # too little, the pipeline's fallback chain escalates to a heavier reader, so
+    # the downside is bounded.
     return (
         _trafilatura.extract(
             html,
             output_format="markdown",
             include_comments=False,
-            favor_recall=True,
+            favor_precision=True,
         )
         or ""
     ).strip()

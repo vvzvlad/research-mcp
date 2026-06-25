@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import ssl
 import time
 from urllib.parse import urlsplit, urlunsplit
 
@@ -46,6 +47,22 @@ from src.providers.pdf import extract_pdf_text, looks_like_pdf
 from src.providers.registry import REGISTRY
 from src.providers.trafilatura import TrafilaturaRead, extract_markdown
 from src.settings import Settings
+
+
+def _is_tls_verify_error(exc: Exception) -> bool:
+    """True if ``exc`` (or a cause in its chain) is a TLS certificate
+    verification failure. httpx wraps these in ``httpx.ConnectError`` whose
+    underlying cause is ``ssl.SSLCertVerificationError``."""
+    seen = 0
+    cur: BaseException | None = exc
+    while cur is not None and seen < 6:
+        if isinstance(cur, ssl.SSLCertVerificationError):
+            return True
+        if "CERTIFICATE_VERIFY_FAILED" in str(cur):
+            return True
+        cur = cur.__cause__ or cur.__context__
+        seen += 1
+    return False
 
 
 def _normalize_url(url: str) -> str:
@@ -450,23 +467,46 @@ class Pipeline:
         Returns ``(pdf_text, html)``:
         - PDF detected → ``(extracted_text, None)``.
         - HTML fetched → ``(None, body_text)`` so the caller can reuse the body.
-        - probe failed on a non-PDF url → ``(None, None)``; HTML providers retry.
+        - probe could not fetch the page → ``(None, None)``; the read pipeline then
+          tries its providers (jina/tavily/firecrawl fetch server-side and can often
+          retrieve pages/PDFs the direct client cannot — SSL/403/anti-bot).
 
-        Raises ``ProviderError`` only when a clearly-PDF url cannot be downloaded.
+        A TLS certificate-verification failure triggers ONE retry without
+        verification (some legitimate hosts ship a broken chain). The probe never
+        hard-fails anymore — a failed fetch always defers to the provider chain.
         """
-        suffix_pdf = url.split("?", 1)[0].rstrip().lower().endswith(".pdf")
-        try:
-            response = await client.get(
-                url, headers={"User-Agent": BROWSER_USER_AGENT}
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            if suffix_pdf:
-                raise ProviderError(f"Не удалось загрузить PDF {url}: {exc}") from exc
-            # Not obviously a PDF and the probe failed — let HTML providers try.
+        response = await self._probe_fetch(client, url)
+        if response is None:
             return None, None
-
         content_type = response.headers.get("Content-Type")
         if looks_like_pdf(url, content_type, response.content[:8]):
             return extract_pdf_text(response.content), None
         return None, response.text
+
+    async def _probe_fetch(self, client: httpx.AsyncClient, url: str) -> httpx.Response | None:
+        """GET ``url`` for the probe; return the response or ``None`` if unfetchable.
+
+        On a TLS certificate-verification error, retry once with verification
+        disabled (public read-only fetch; we accept the MITM risk and warn).
+        """
+        try:
+            response = await client.get(url, headers={"User-Agent": BROWSER_USER_AGENT})
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as exc:
+            if not _is_tls_verify_error(exc):
+                return None
+        # TLS verification failed → one insecure retry on a throwaway client.
+        logger.warning("read url={} -> TLS verification failed; retrying without verification", url)
+        try:
+            async with httpx.AsyncClient(
+                verify=False,
+                timeout=self._settings.request_timeout,
+                follow_redirects=True,
+            ) as insecure:
+                response = await insecure.get(url, headers={"User-Agent": BROWSER_USER_AGENT})
+                response.raise_for_status()
+                _ = response.content  # force-read the body before the client closes
+                return response
+        except httpx.HTTPError:
+            return None

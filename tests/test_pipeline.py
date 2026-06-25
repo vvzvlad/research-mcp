@@ -12,6 +12,7 @@ import respx
 
 from src.pipeline import Pipeline
 from src.providers.base import ProviderError
+from src.providers.trafilatura import extract_markdown
 
 SAMPLE_PDF = (Path(__file__).parent / "fixtures" / "sample.pdf").read_bytes()
 
@@ -280,6 +281,31 @@ async def test_read_all_fail_raises(monkeypatch, settings):
         await pipe.aclose()
 
 
+# -- probe defers to provider chain (fix A) --------------------------------
+
+
+@respx.mock
+async def test_read_pdf_probe_403_falls_through_to_provider(monkeypatch, settings):
+    # A .pdf url whose DIRECT probe GET 403s must NOT hard-fail: the probe defers
+    # to the read chain, and jina (server-side, keyless) can still retrieve it.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")  # enable a search provider
+
+    url = "https://files.test/doc.pdf"
+    respx.get(url).mock(return_value=httpx.Response(403))
+    jina_md = "# PDF via jina\n\n" + ("Server-side fetched content. " * 50)
+    respx.get(f"https://r.jina.ai/{url}").mock(
+        return_value=httpx.Response(200, text=jina_md)
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        out = await pipe.read(url)  # must NOT raise ProviderError
+    finally:
+        await pipe.aclose()
+    assert "PDF via jina" in out
+
+
 # -- PDF detection ---------------------------------------------------------
 
 
@@ -318,6 +344,37 @@ async def test_read_pdf_by_magic_bytes(monkeypatch, settings):
     finally:
         await pipe.aclose()
     assert "Hello PDF research-mcp" in out
+
+
+# -- TLS verification retry (fix B) ----------------------------------------
+
+
+@respx.mock
+async def test_read_tls_verify_error_retries_insecure(monkeypatch, settings, capture_logs):
+    # A TLS certificate-verification failure on the probe GET triggers ONE retry
+    # with verification disabled. respx patches the transport globally, so the
+    # throwaway insecure client is intercepted too: the second call returns the
+    # PDF, which is extracted as the result.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+
+    url = "https://broken-cert.test/doc.pdf"
+    route = respx.get(url)
+    route.side_effect = [
+        httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"),
+        httpx.Response(
+            200, content=SAMPLE_PDF, headers={"Content-Type": "application/pdf"}
+        ),
+    ]
+
+    pipe = Pipeline.build(settings)
+    try:
+        out = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    assert "Hello PDF research-mcp" in out
+    assert route.call_count == 2  # original + the insecure retry
+    assert any("TLS verification failed" in m for m in capture_logs)
 
 
 # -- transient retry -------------------------------------------------------
@@ -510,3 +567,31 @@ async def test_proxied_provider_still_serves(monkeypatch, settings):
         assert proxied is not direct
     finally:
         await pipe.aclose()
+
+
+# -- trafilatura extraction contract (fix C) ------------------------------
+
+
+def test_extract_markdown_uses_precision(monkeypatch):
+    # Deterministic regression guard for fix C: assert the exact kwargs handed to
+    # trafilatura.extract. A content-based assertion would be tautological (it
+    # passes under both favor_recall and favor_precision); spying on the call
+    # locks the contract so a revert to favor_recall fails the test.
+    captured_kwargs: dict[str, object] = {}
+
+    def spy(html, **kwargs):
+        captured_kwargs.clear()
+        captured_kwargs.update(kwargs)
+        return "# Fixed markdown\n\nNon-empty content."
+
+    monkeypatch.setattr(
+        "src.providers.trafilatura._trafilatura.extract", spy
+    )
+
+    out = extract_markdown("<html><body><article>hello</article></body></html>")
+
+    assert out == "# Fixed markdown\n\nNon-empty content."  # spy result, non-empty
+    assert captured_kwargs.get("favor_precision") is True
+    assert captured_kwargs.get("favor_recall") is not True
+    assert captured_kwargs.get("output_format") == "markdown"
+    assert captured_kwargs.get("include_comments") is False
