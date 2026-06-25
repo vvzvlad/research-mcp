@@ -386,6 +386,85 @@ async def test_read_emits_per_request_log(monkeypatch, settings, capture_logs):
 
 
 @respx.mock
+async def test_search_log_counts_paid_calls(monkeypatch, settings, capture_logs):
+    # searxng (free) + serper (paid) both return → 1 paid of 2 billed = 50.0%.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(
+            200, json={"results": [{"url": "https://sx.test", "title": "Sx", "content": "a"}]}
+        )
+    )
+    respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(
+            200, json={"organic": [{"link": "https://sp.test", "title": "Sp", "snippet": "b"}]}
+        )
+    )
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+    line = next((m for m in capture_logs if m.startswith("search query=")), None)
+    assert line is not None
+    assert "paid_calls=1" in line  # serper is the one paid provider
+    assert "paid_pct=50.0%" in line  # one paid of two billed calls
+
+
+@respx.mock
+async def test_read_log_counts_paid_calls(monkeypatch, settings, capture_logs):
+    # trafilatura thin + jina 500 + tavily-1 ok → winning paid provider logged.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("TAVILY_1_API_KEY", "t1")
+
+    url = "https://doc.test/page"
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(500))
+    good = "Tavily-1 extracted content. " * 40
+    respx.post("https://api.tavily.com/extract").mock(
+        return_value=httpx.Response(
+            200, json={"results": [{"url": url, "raw_content": good}], "failed_results": []}
+        )
+    )
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    line = next((m for m in capture_logs if m.startswith("read url=")), None)
+    assert line is not None
+    assert "ok=true" in line
+    assert "provider=tavily-1" in line
+    assert "tried=" in line  # the chain that was walked
+    assert "paid_calls=" in line
+    assert "paid_calls=0" not in line  # tavily-1 is paid → at least one paid call
+
+
+@respx.mock
+async def test_read_all_fail_logs_failed_line(monkeypatch, settings, capture_logs):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+
+    url = "https://dead.test/x"
+    respx.get(url).mock(side_effect=httpx.ConnectError("nope"))
+    respx.get(f"https://r.jina.ai/{url}").mock(side_effect=httpx.ConnectError("nope"))
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ProviderError):
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    line = next((m for m in capture_logs if "FAILED" in m), None)
+    assert line is not None
+    assert "ok=false" in line
+    assert url in line
+    assert "tried=" in line
+
+
+@respx.mock
 async def test_read_pdf_logs_provider_pdf(monkeypatch, settings, capture_logs):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")

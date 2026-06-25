@@ -28,6 +28,7 @@ from loguru import logger
 from src.config_errors import ConfigError
 from src.pipeline_config import (
     INSTANCES,
+    PAID_TYPES,
     READ_PIPELINE,
     SEARCH_PIPELINE,
     Instance,
@@ -139,10 +140,19 @@ class Pipeline:
         search_instances: list[SearchProvider],
         read_instances: list[ReadProvider],
         client: httpx.AsyncClient | None = None,
+        paid_names: set[str] | frozenset[str] | None = None,
     ) -> None:
         self._settings = settings
         self._search = search_instances
         self._read = read_instances
+        # Names of the enabled instances whose TYPE bills per successful request.
+        self._paid: frozenset[str] = frozenset(paid_names or ())
+        # Cumulative BILLED counters for this process: paid calls and total
+        # calls. They are in-memory and reset on restart; the per-request
+        # `paid_calls=` field in each log line lets the full history be
+        # re-aggregated from the log file across restarts.
+        self._cum_paid = 0
+        self._cum_calls = 0
         # Do NOT create clients eagerly: build() runs before the event loop
         # starts, and an httpx.AsyncClient created here would be bound to (and
         # later closed by) the wrong loop/lifespan. The manager creates them
@@ -159,6 +169,7 @@ class Pipeline:
         Raises ``ConfigError`` if no search or no read instance is enabled.
         """
         built: dict[str, object] = {}
+        paid_names: set[str] = set()
 
         for inst in INSTANCES:
             config = _resolve_instance(inst)
@@ -187,6 +198,10 @@ class Pipeline:
             except Exception as exc:  # noqa: BLE001 — provider __init__ guard
                 logger.warning("Provider instance '{}' failed to build: {}", inst.name, exc)
                 continue
+            # Track which enabled instances bill per successful request (used
+            # only for the paid-vs-free accounting in the per-request logs).
+            if inst.type in PAID_TYPES:
+                paid_names.add(inst.name)
             logger.info("Provider instance '{}' ({}) enabled", inst.name, inst.type)
 
         # Every key in `built` came from INSTANCES, so membership in `built` is
@@ -205,7 +220,13 @@ class Pipeline:
                 "should not happen — check src/pipeline_config.py."
             )
 
-        return cls(settings, search_instances, read_instances, client=client)  # type: ignore[arg-type]
+        return cls(  # type: ignore[arg-type]
+            settings,
+            search_instances,
+            read_instances,
+            client=client,
+            paid_names=paid_names,
+        )
 
     async def aclose(self) -> None:
         """Close every per-proxy httpx client."""
@@ -218,6 +239,22 @@ class Pipeline:
     @property
     def read_names(self) -> list[str]:
         return [p.name for p in self._read]
+
+    # -- usage accounting ---------------------------------------------------
+
+    def _account(self, billed: list[str]) -> tuple[int, float]:
+        """Fold one request's billed upstream calls into the cumulative counters.
+
+        `billed` = names of provider instances whose upstream call returned data
+        (a billed 200; thin results count, raised/errored calls do not). Returns
+        (paid_calls_this_request, cumulative_paid_percent). Mutates the counters
+        synchronously (no await), so it is safe under asyncio.gather concurrency.
+        """
+        paid = sum(1 for name in billed if name in self._paid)
+        self._cum_paid += paid
+        self._cum_calls += len(billed)
+        pct = (100.0 * self._cum_paid / self._cum_calls) if self._cum_calls else 0.0
+        return paid, pct
 
     # -- search -------------------------------------------------------------
 
@@ -269,12 +306,20 @@ class Pipeline:
         merged = merged[:num_results]
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        # The billed calls are exactly `used`: each successful search provider
+        # returned data (a billed 200). Fold them into the cumulative counters.
+        paid_calls, pct = self._account(used)
         # One per-request line for the persistent log (no bodies/secrets).
         logger.info(
-            "search query={!r} providers={} results={} elapsed_ms={}",
+            "search query={!r} providers={} results={} paid_calls={} "
+            "cum_paid={} cum_calls={} paid_pct={:.1f}% elapsed_ms={}",
             query,
             used,
             len(merged),
+            paid_calls,
+            self._cum_paid,
+            self._cum_calls,
+            pct,
             elapsed_ms,
         )
         return merged
@@ -291,13 +336,54 @@ class Pipeline:
         def _ms() -> int:
             return int((time.monotonic() - started) * 1000)
 
+        # Accounting state for this request: every provider entered in the
+        # fallback chain (in order), and the subset whose upstream call returned
+        # content without raising (a billed 200; thin results count too).
+        tried: list[str] = []
+        billed: list[str] = []
+
+        def _log_ok(provider_name: str, suffix: str = "") -> None:
+            # Fold the billed calls into the cumulative counters and emit the
+            # single success line. Used by the pdf / full / thin branches so the
+            # accounting fields stay identical everywhere.
+            paid_calls, pct = self._account(billed)
+            logger.info(
+                "read url={} -> provider={} ok=true paid_calls={} cum_paid={} "
+                "cum_calls={} paid_pct={:.1f}% tried={} elapsed_ms={}" + suffix,
+                url,
+                provider_name,
+                paid_calls,
+                self._cum_paid,
+                self._cum_calls,
+                pct,
+                tried,
+                _ms(),
+            )
+
         # 1) One probe GET decides the path. If it is a PDF, we are done; if it
         #    is HTML, reuse that body for the trafilatura step (no second GET).
         #    The probe is a generic fetch + PDF/HTML detect, so it uses the
         #    direct client (the proxied providers fetch with their own client).
-        pdf_text, probe_html = await self._probe(self._clients.client_for(None), url)
+        #    The probe is NOT a provider call, so it is never billed.
+        try:
+            pdf_text, probe_html = await self._probe(self._clients.client_for(None), url)
+        except ProviderError:
+            paid_calls, pct = self._account(billed)  # billed is empty here
+            logger.warning(
+                "read url={} -> FAILED ok=false tried={} paid_calls={} "
+                "cum_paid={} cum_calls={} paid_pct={:.1f}% elapsed_ms={} "
+                "errors=pdf probe failed",
+                url,
+                tried,
+                paid_calls,
+                self._cum_paid,
+                self._cum_calls,
+                pct,
+                _ms(),
+            )
+            raise
         if pdf_text is not None:
-            logger.info("read url={} -> provider=pdf ok=true elapsed_ms={}", url, _ms())
+            _log_ok("pdf")
             return pdf_text
 
         # 2) HTML path: walk the read pipeline until one yields enough content.
@@ -305,6 +391,7 @@ class Pipeline:
         best_thin: str | None = None
         best_thin_name: str | None = None
         for provider in self._read:
+            tried.append(provider.name)
             try:
                 content = await self._read_one(provider, url, probe_html)
             except ProviderError as exc:
@@ -313,13 +400,10 @@ class Pipeline:
             except Exception as exc:  # noqa: BLE001 — treat as provider failure
                 errors.append(f"{provider.name}: {exc}")
                 continue
+            # Returned without raising → a billed 200 (even if too thin).
+            billed.append(provider.name)
             if len(content) >= self._settings.fallback_min_chars:
-                logger.info(
-                    "read url={} -> provider={} ok=true elapsed_ms={}",
-                    url,
-                    provider.name,
-                    _ms(),
-                )
+                _log_ok(provider.name)
                 return content
             # Too thin — remember the longest thin result as a last resort.
             if best_thin is None or len(content) > len(best_thin):
@@ -328,14 +412,21 @@ class Pipeline:
             errors.append(f"{provider.name}: content too thin ({len(content)} chars)")
 
         if best_thin:
-            logger.info(
-                "read url={} -> provider={} ok=true elapsed_ms={} (thin fallback)",
-                url,
-                best_thin_name,
-                _ms(),
-            )
+            _log_ok(best_thin_name or "", suffix=" (thin fallback)")
             return best_thin
-        logger.warning("read url={} -> all providers failed elapsed_ms={}", url, _ms())
+        paid_calls, pct = self._account(billed)
+        logger.warning(
+            "read url={} -> FAILED ok=false tried={} paid_calls={} cum_paid={} "
+            "cum_calls={} paid_pct={:.1f}% elapsed_ms={} errors={}",
+            url,
+            tried,
+            paid_calls,
+            self._cum_paid,
+            self._cum_calls,
+            pct,
+            _ms(),
+            "; ".join(errors),
+        )
         raise ProviderError("Не удалось прочитать страницу. " + "; ".join(errors))
 
     async def _read_one(self, provider: ReadProvider, url: str, probe_html: str | None) -> str:

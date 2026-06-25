@@ -73,3 +73,9 @@ READ_PIPELINE: list[str] = [
     "tavily-2",
     "firecrawl",
 ]
+
+# Provider TYPES that bill per successful request (external metered APIs). Used
+# ONLY for usage accounting in the logs. Self-hosted / free types (searxng,
+# trafilatura, crawl4ai) are never counted as paid. jina is metered when an API
+# key is configured, so it is classified as paid.
+PAID_TYPES: frozenset[str] = frozenset({"serper", "exa", "jina", "tavily", "firecrawl"})

@@ -5,7 +5,7 @@ import pytest
 
 from src.config_errors import ConfigError
 from src.pipeline import Pipeline, _resolve_instance
-from src.pipeline_config import INSTANCES
+from src.pipeline_config import INSTANCES, PAID_TYPES
 
 
 def _inst(name):
@@ -52,6 +52,15 @@ def test_instances_store_env_names_not_values():
             if attr is not None:
                 assert attr.isupper()
                 assert "://" not in attr
+
+
+def test_paid_types_classification():
+    # Self-hosted / free types are never billed.
+    for free in ("searxng", "trafilatura", "crawl4ai"):
+        assert free not in PAID_TYPES
+    # External metered APIs are billed (jina is metered when keyed).
+    for paid in ("serper", "exa", "jina", "tavily", "firecrawl"):
+        assert paid in PAID_TYPES
 
 
 def test_resolve_disabled_when_key_missing(monkeypatch):
