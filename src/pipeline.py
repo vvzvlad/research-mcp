@@ -382,23 +382,9 @@ class Pipeline:
         #    The probe is a generic fetch + PDF/HTML detect, so it uses the
         #    direct client (the proxied providers fetch with their own client).
         #    The probe is NOT a provider call, so it is never billed.
-        try:
-            pdf_text, probe_html = await self._probe(self._clients.client_for(None), url)
-        except ProviderError:
-            paid_calls, pct = self._account(billed)  # billed is empty here
-            logger.warning(
-                "read url={} -> FAILED ok=false tried={} paid_calls={} "
-                "cum_paid={} cum_calls={} paid_pct={:.1f}% elapsed_ms={} "
-                "errors=pdf probe failed",
-                url,
-                tried,
-                paid_calls,
-                self._cum_paid,
-                self._cum_calls,
-                pct,
-                _ms(),
-            )
-            raise
+        # The probe never hard-fails: a fetch error or an unparseable "PDF"
+        # defers to the read chain below (jina/tavily/firecrawl fetch server-side).
+        pdf_text, probe_html = await self._probe(self._clients.client_for(None), url)
         if pdf_text is not None:
             _log_ok("pdf")
             return pdf_text
@@ -473,14 +459,30 @@ class Pipeline:
 
         A TLS certificate-verification failure triggers ONE retry without
         verification (some legitimate hosts ship a broken chain). The probe never
-        hard-fails anymore — a failed fetch always defers to the provider chain.
+        hard-fails anymore — a failed fetch always defers to the provider chain,
+        and a body that looks like a PDF but fails to parse ALSO defers to the
+        provider chain instead of raising.
         """
         response = await self._probe_fetch(client, url)
         if response is None:
             return None, None
         content_type = response.headers.get("Content-Type")
         if looks_like_pdf(url, content_type, response.content[:8]):
-            return extract_pdf_text(response.content), None
+            try:
+                return extract_pdf_text(response.content), None
+            except ProviderError:
+                # Looked like a PDF (usually just the .pdf suffix) but the bytes
+                # do not parse as one — typically an antibot/HTML interstitial
+                # served at a .pdf URL, or a truncated download. Do NOT hard-fail:
+                # defer to the read chain, where jina/tavily/firecrawl fetch
+                # server-side and can retrieve the real PDF (mirrors the 403
+                # defer-to-provider behaviour above).
+                logger.warning(
+                    "read url={} -> looks like PDF but bytes did not parse; "
+                    "deferring to provider chain",
+                    url,
+                )
+                return None, None
         return None, response.text
 
     async def _probe_fetch(self, client: httpx.AsyncClient, url: str) -> httpx.Response | None:

@@ -306,6 +306,76 @@ async def test_read_pdf_probe_403_falls_through_to_provider(monkeypatch, setting
     assert "PDF via jina" in out
 
 
+@respx.mock
+async def test_read_pdf_200_nonpdf_body_falls_through_to_provider(monkeypatch, settings):
+    # Regression: a .pdf url that returns HTTP 200 but whose body is NOT a
+    # parseable PDF (antibot/HTML interstitial) must NOT hard-fail. The probe
+    # catches the parse error and defers to the read chain, where jina fetches
+    # server-side and retrieves the real content.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")  # enable a search provider
+
+    url = "https://files.test/doc.pdf"
+    respx.get(url).mock(
+        return_value=httpx.Response(
+            200,
+            content=b"<html><body>Just a moment... checking your browser</body></html>",
+            headers={"Content-Type": "text/html"},
+        )
+    )
+    jina_md = "# PDF via jina\n\n" + ("Server-side fetched content. " * 50)
+    respx.get(f"https://r.jina.ai/{url}").mock(
+        return_value=httpx.Response(200, text=jina_md)
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        out = await pipe.read(url)  # must NOT raise ProviderError
+    finally:
+        await pipe.aclose()
+    assert "PDF via jina" in out
+
+
+@respx.mock
+async def test_read_pdf_200_nonpdf_body_no_provider_raises_normal_failure(
+    monkeypatch, settings, capture_logs
+):
+    # Same 200 non-PDF .pdf body, but no working read provider beyond trafilatura.
+    # The read ultimately fails, but with the NORMAL failure path: a populated
+    # tried=[...] and real per-provider errors — NOT the old "pdf probe failed".
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+
+    url = "https://files.test/doc.pdf"
+    # Probe GET returns the 200 non-PDF interstitial (the regression trigger);
+    # trafilatura's re-fetch is then blocked (antibot), so no provider yields
+    # content and the read fails through the normal path.
+    respx.get(url).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                content=b"<html><body>Just a moment... checking your browser</body></html>",
+                headers={"Content-Type": "text/html"},
+            ),
+            httpx.ConnectError("nope"),
+        ]
+    )
+    respx.get(f"https://r.jina.ai/{url}").mock(side_effect=httpx.ConnectError("nope"))
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ProviderError):
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    line = next((m for m in capture_logs if "FAILED" in m), None)
+    assert line is not None
+    assert "ok=false" in line
+    assert "tried=[" in line
+    assert "tried=[]" not in line
+    assert "pdf probe failed" not in line
+
+
 # -- PDF detection ---------------------------------------------------------
 
 
