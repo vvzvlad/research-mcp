@@ -10,6 +10,13 @@ on:
 permissions:
   contents: read   # checkout
 
+# Two pushes to main in a row must not race: the runs are independent and the
+# older one may finish last, leaving its :latest on the registry — watchtower
+# polls every 2 seconds and would ship the previous commit to prod.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -50,20 +57,44 @@ jobs:
     - name: Compute image tags
       id: tags
       # main -> :latest + :<sha> (watchtower deploys :latest)
+      env:
+        # Passed through the environment instead of being interpolated into the
+        # script text: git allows `$`, backticks, quotes and parentheses in branch
+        # names, so a branch like `feat/$(id)` would otherwise execute on the runner.
+        REF_NAME: ${{ github.ref_name }}
+        IMAGE: gitea.vvzvlad.xyz/${{ github.repository }}
+        SHA: ${{ github.sha }}
       run: |
-        if [ "${{ github.ref_name }}" = "main" ]; then
-          echo "tags=gitea.vvzvlad.xyz/${{ github.repository }}:latest gitea.vvzvlad.xyz/${{ github.repository }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        if [ "$REF_NAME" = "main" ]; then
+          echo "tags=$IMAGE:latest $IMAGE:$SHA" >> "$GITHUB_OUTPUT"
         else
-          branch_tag=$(printf '%s' "${{ github.ref_name }}" | tr -c 'A-Za-z0-9_.-' '-')
-          echo "tags=gitea.vvzvlad.xyz/${{ github.repository }}:${branch_tag}" >> "$GITHUB_OUTPUT"
+          # Sanitise the branch name into a legal docker tag: everything outside
+          # [A-Za-z0-9_.-] becomes `-`, and the result is cut to 100 chars —
+          # branch names have no length limit, docker rejects tags over 128.
+          branch_tag=$(printf '%s' "$REF_NAME" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-100)
+          echo "tags=$IMAGE:${branch_tag}" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Build the Docker image
       run: |
         tag_args=""
         for tag in ${{ steps.tags.outputs.tags }}; do tag_args="$tag_args --tag $tag"; done
-        docker build . --file Dockerfile $tag_args
+        # --pull is required here: unlike GitHub's ephemeral runners, cirunner-hatbox
+        # is self-hosted with a persistent docker daemon, so a once-pulled
+        # python:3.11-slim would sit in its cache for months and every build would
+        # inherit an unpatched base layer.
+        docker build --pull . --file Dockerfile $tag_args
 
     - name: Push Docker images
       run: |
         for tag in ${{ steps.tags.outputs.tags }}; do docker push "$tag"; done
+
+    - name: Remove the built images from the runner
+      # The runner's docker daemon is persistent, so every build would otherwise
+      # leave its images and build-cache layers behind and grow the disk forever.
+      # Only the tags built by this run are dropped — no `docker system prune`,
+      # which would also wipe images of other repos sharing the same daemon.
+      # `always()` so the cleanup runs even when the push above fails.
+      if: always()
+      run: |
+        for tag in ${{ steps.tags.outputs.tags }}; do docker rmi "$tag" || true; done

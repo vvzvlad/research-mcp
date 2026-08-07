@@ -1,0 +1,36 @@
+name: Tests
+
+# Split out from image-check-publish.yml on purpose: that workflow must never
+# run on pull_request, because a PR build would push :latest and watchtower
+# would deploy it. Tests alone are safe here and are what a PR actually needs.
+on:
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read   # checkout
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.11"   # same as the Dockerfile base image
+
+    - name: Install dependencies
+      run: pip install -r requirements-dev.txt
+
+    - name: Run tests
+      env:
+        # Safety net for a search provider: the suite sets the provider env vars
+        # itself, and the URL is never contacted (respx mocks all HTTP).
+        SEARXNG_URL: http://searxng:8080
+      run: pytest --tb=short -q
