@@ -7,6 +7,6 @@ __pycache__/
 .pytest_cache/
 data/
 tests/
-.github/
+.gitea/
 *.md
 .DS_Store

@@ -1,4 +1,4 @@
-# Deploy template. Pull the prebuilt image from ghcr.io — do NOT build on prod.
+# Deploy template. Pull the prebuilt image from gitea.vvzvlad.xyz — do NOT build on prod.
 # Values below are PLACEHOLDERS (XXX), not real secrets.
 #
 # WEB-SERVICE variant (published via Traefik + basicAuth). Auth is enforced by
@@ -18,7 +18,7 @@ networks:
 
 services:
   research_mcp:
-    image: ghcr.io/vvzvlad/research-mcp:latest
+    image: gitea.vvzvlad.xyz/projects/research-mcp:latest
     container_name: research-mcp
     restart: always
     volumes:

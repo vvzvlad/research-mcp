@@ -1,0 +1,69 @@
+name: Docker Image CI
+
+# No `pull_request` trigger on purpose: a PR build would push :latest, which
+# watchtower auto-deploys to prod.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read   # checkout
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.11"   # same as the Dockerfile base image
+
+    - name: Install dependencies
+      run: pip install -r requirements-dev.txt
+
+    - name: Run tests
+      env:
+        # Safety net for a search provider: the suite sets provider env vars
+        # itself (monkeypatch), so this is not required today. The URL is never
+        # contacted — the tests are offline (respx mocks all HTTP).
+        SEARXNG_URL: http://searxng:8080
+      run: pytest --tb=short -q
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test                          # no green tests → no image is built
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Log in to the Gitea container registry
+      uses: docker/login-action@v4
+      with:
+        registry: gitea.vvzvlad.xyz
+        username: ${{ github.repository_owner }}
+        # Org-level secret on `projects`; the built-in GITEA_TOKEN has no
+        # package scope and cannot push images.
+        password: ${{ secrets.REGISTRY_TOKEN }}
+
+    - name: Compute image tags
+      id: tags
+      # main -> :latest + :<sha> (watchtower deploys :latest)
+      run: |
+        if [ "${{ github.ref_name }}" = "main" ]; then
+          echo "tags=gitea.vvzvlad.xyz/${{ github.repository }}:latest gitea.vvzvlad.xyz/${{ github.repository }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        else
+          branch_tag=$(printf '%s' "${{ github.ref_name }}" | tr -c 'A-Za-z0-9_.-' '-')
+          echo "tags=gitea.vvzvlad.xyz/${{ github.repository }}:${branch_tag}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Build the Docker image
+      run: |
+        tag_args=""
+        for tag in ${{ steps.tags.outputs.tags }}; do tag_args="$tag_args --tag $tag"; done
+        docker build . --file Dockerfile $tag_args
+
+    - name: Push Docker images
+      run: |
+        for tag in ${{ steps.tags.outputs.tags }}; do docker push "$tag"; done

@@ -112,7 +112,8 @@ bodies or secrets are logged, only urls/queries, provider names, counts, timings
 
 ## Deployment
 
-CI builds the image and pushes it to `ghcr.io` (`test` → `build`, tags `latest` +
+Gitea Actions builds the image and pushes it to the Gitea registry
+`gitea.vvzvlad.xyz/projects/research-mcp` (`test` → `build`, tags `latest` +
 `sha`). On prod we pull the prebuilt image via `docker-compose.yml` (behind
 Traefik + basicAuth, watchtower auto-updates `latest`; the `data/` volume keeps
 the log file across updates) — we never build on prod.
