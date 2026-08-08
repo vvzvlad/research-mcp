@@ -4,6 +4,10 @@ name: Tests
 # run on pull_request, because a PR build would push :latest and watchtower
 # would deploy it. Tests alone are safe here and are what a PR actually needs.
 on:
+  # Manual re-run: without it a run that flaked on runner networking could only be
+  # retried by pushing an empty commit to the PR branch. Safe to expose here — this
+  # workflow touches no registry and no secrets, it only runs the test suite.
+  workflow_dispatch:
   pull_request:
     branches: [ "main" ]
 

@@ -67,11 +67,22 @@ jobs:
         # script text: git allows `$`, backticks, quotes and parentheses in branch
         # names, so a branch like `feat/$(id)` would otherwise execute on the runner.
         REF_NAME: ${{ github.ref_name }}
-        IMAGE: gitea.vvzvlad.xyz/${{ github.repository }}
+        REPO: ${{ github.repository }}
         SHA: ${{ github.sha }}
       run: |
+        # Gitea allows uppercase letters in repository names, docker does not
+        # accept them in an image path — a repo like `My-Bot` would fail the
+        # build with `invalid reference format`, so lowercase it here.
+        IMAGE="gitea.vvzvlad.xyz/$(printf '%s' "$REPO" | tr 'A-Z' 'a-z')"
         if [ "$REF_NAME" = "main" ]; then
-          echo "tags=$IMAGE:latest $IMAGE:$SHA" >> "$GITHUB_OUTPUT"
+          # Tag ORDER matters and must not be "tidied up": the push step iterates
+          # over $TAGS left to right, so :latest is pushed LAST and acts as the
+          # commit of the whole publication. If :<sha> fails to push (network,
+          # registry quota, disk), the run stops before :latest moves and prod
+          # keeps running the previous image. The reverse order would publish a
+          # :latest that watchtower deploys within 2 minutes while its immutable
+          # :<sha> twin — the only rollback point — never made it to the registry.
+          echo "tags=$IMAGE:$SHA $IMAGE:latest" >> "$GITHUB_OUTPUT"
         else
           # Sanitise the branch name into a legal docker tag: everything outside
           # [A-Za-z0-9_.-] becomes `-`, and the result is cut to 100 chars —
@@ -81,6 +92,15 @@ jobs:
           # or `+wip` would otherwise produce a leading `-` and fail the build
           # with `invalid reference format`.
           branch_tag=$(printf '%s' "$REF_NAME" | tr -c 'A-Za-z0-9_.-' '-' | sed 's/^[^A-Za-z0-9_]/_/' | cut -c1-100)
+          # The sanitiser passes a name through untouched when it already consists
+          # of legal characters, so a branch literally named `latest` would come
+          # out as the production tag and — one manual workflow_dispatch later —
+          # ship unreviewed code to every watchtower host. The `main` check above
+          # does not cover this: the branch is not `main`, it only borrows its tag.
+          # Reserved names are therefore prefixed instead of being used as-is.
+          if [ "$branch_tag" = "latest" ]; then
+            branch_tag="branch-latest"
+          fi
           echo "tags=$IMAGE:${branch_tag}" >> "$GITHUB_OUTPUT"
         fi
 
