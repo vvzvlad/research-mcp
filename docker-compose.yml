@@ -6,7 +6,7 @@
 # /app/data, kept on a named volume so it survives restarts and image updates.
 #
 # Provider instances are enabled by which env vars are set. Set at least one
-# search (SEARXNG_URL / SERPER_API_KEY / EXA_API_KEY) and rely on trafilatura +
+# search (SEARXNG_URL / BRAVE_API_KEY / SERPER_API_KEY / EXA_API_KEY) and rely on trafilatura +
 # any read providers you configure. Leave a var out to disable that instance.
 
 volumes:
@@ -26,6 +26,7 @@ services:
     environment:
       # --- search (need >= 1) ---
       SEARXNG_URL: XXX            # e.g. http://searxng:8080
+      BRAVE_API_KEY: XXX         # optional (Brave Search API subscription token)
       SERPER_API_KEY: XXX        # optional
       EXA_API_KEY: XXX           # optional
       # --- read (trafilatura is always on; these are optional extras) ---
@@ -37,6 +38,7 @@ services:
       FIRECRAWL_API_KEY: XXX     # optional
       # --- per-instance proxy (optional, SOCKS5/HTTP; for clean egress) ---
       # EXA_PROXY: socks5://internal.lc:1080
+      # BRAVE_PROXY: socks5://internal.lc:1080
       # SERPER_PROXY: socks5://internal.lc:1080
       # JINA_PROXY: socks5://internal.lc:1080
       # TAVILY_1_PROXY: socks5://internal.lc:1080

@@ -1,36 +1,22 @@
 """Instance loading: ENV-name resolution, enable/disable, startup validation."""
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import httpx
 import pytest
 
 from src.config_errors import ConfigError
 from src.pipeline import Pipeline, _resolve_instance
-from src.pipeline_config import INSTANCES, PAID_TYPES
+from src.pipeline_config import INSTANCES, PAID_TYPES, READ_PIPELINE, SEARCH_PIPELINE
+from src.providers.brave import BraveSearch
+from tests.conftest import _clear_provider_env
 
 
 def _inst(name):
     return next(i for i in INSTANCES if i.name == name)
-
-
-def _clear_provider_env(monkeypatch):
-    for var in (
-        "SEARXNG_URL",
-        "SERPER_API_KEY",
-        "EXA_API_KEY",
-        "JINA_API_KEY",
-        "CRAWL4AI_URL",
-        "CRAWL4AI_TOKEN",
-        "TAVILY_1_API_KEY",
-        "TAVILY_2_API_KEY",
-        "FIRECRAWL_API_KEY",
-        "SERPER_PROXY",
-        "EXA_PROXY",
-        "JINA_PROXY",
-        "TAVILY_1_PROXY",
-        "TAVILY_2_PROXY",
-        "FIRECRAWL_PROXY",
-    ):
-        monkeypatch.delenv(var, raising=False)
 
 
 def test_instances_store_env_names_not_values():
@@ -58,9 +44,88 @@ def test_paid_types_classification():
     # Self-hosted / free types are never billed.
     for free in ("searxng", "trafilatura", "crawl4ai"):
         assert free not in PAID_TYPES
-    # External metered APIs are billed (jina is metered when keyed).
-    for paid in ("serper", "exa", "jina", "tavily", "firecrawl"):
+    # External metered APIs are billed (jina is metered when keyed; brave's free
+    # plan gives 2000 queries a month and then 429s, paid plans bill separately —
+    # what is tracked here is metered external calls, not invoices).
+    for paid in ("brave", "serper", "exa", "jina", "tavily", "firecrawl"):
         assert paid in PAID_TYPES
+
+
+def test_search_pipeline_order():
+    # Order is load-bearing: dedup keeps the hit from the earlier provider, and
+    # brave (own index, best quality of the paid ones) must outrank serper/exa.
+    assert SEARCH_PIPELINE == ["searxng", "brave", "serper", "exa"]
+
+
+def test_every_pipeline_name_has_an_instance():
+    # SEARCH_PIPELINE/READ_PIPELINE reference instances by NAME: a renamed or
+    # deleted Instance would otherwise only show up at runtime, as a skipped
+    # provider in the log. (Without this, dropping the brave Instance line keeps
+    # the suite green while brave silently disappears from production.)
+    names = {inst.name for inst in INSTANCES}
+    for name in (*SEARCH_PIPELINE, *READ_PIPELINE):
+        assert name in names
+
+
+def test_brave_instance_is_wired():
+    # The brave instance must exist and name the exact ENV vars documented in
+    # .env.example — this is what actually turns brave on in production.
+    brave = _inst("brave")
+    assert brave.type == "brave"
+    assert brave.api_key_env == "BRAVE_API_KEY"
+    assert brave.proxy_env == "BRAVE_PROXY"
+    assert not brave.optional_api_key  # no key → no brave
+    assert brave.url_env is None
+    assert brave.token_env is None
+
+
+def test_importing_the_providers_package_registers_every_type():
+    # Guards step 2 of the add-a-provider checklist: only an import runs the
+    # @register decorator, so a type missing from src/providers/__init__.py is
+    # simply unknown at startup and its instances are disabled with nothing but a
+    # log line to show for it.
+    #
+    # Deliberately a SUBPROCESS: in this process other test modules have already
+    # imported e.g. src.providers.brave directly, which populates REGISTRY as a
+    # side effect and would mask exactly the missing import we are looking for.
+    code = (
+        "import src.providers\n"
+        "from src.providers.registry import REGISTRY\n"
+        "print(' '.join(sorted(REGISTRY)))\n"
+    )
+    root = Path(__file__).resolve().parents[1]
+    # PYTHONPATH explicitly, not just cwd: `python -c` only prepends cwd to
+    # sys.path when safe-path mode is off, so under PYTHONSAFEPATH=1 (or -P) the
+    # child would fail with ModuleNotFoundError: src and turn this into a false
+    # red. The parent process gets the same thing from `pythonpath = .` in
+    # pytest.ini; the child inherits none of that.
+    # timeout so a hanging import fails the run instead of wedging CI forever —
+    # pytest-timeout is not installed and CI runs a bare pytest.
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root)},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    registered = set(proc.stdout.split())
+    missing = {inst.type for inst in INSTANCES} - registered
+    assert not missing, f"not imported in src/providers/__init__.py: {sorted(missing)}"
+
+
+def test_build_enables_brave_from_its_key(monkeypatch, settings):
+    # End-to-end wiring: BRAVE_API_KEY alone is enough to get a working brave
+    # search provider out of Pipeline.build.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("BRAVE_API_KEY", "k")
+    pipe = Pipeline.build(settings, client=httpx.AsyncClient())
+    assert pipe.search_names == ["brave"]
+    brave = next(p for p in pipe._search if p.name == "brave")
+    assert isinstance(brave, BraveSearch)
+    assert brave.proxy is None  # no BRAVE_PROXY → direct egress
 
 
 def test_resolve_disabled_when_key_missing(monkeypatch):

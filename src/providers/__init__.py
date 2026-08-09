@@ -9,6 +9,7 @@ decorator runs and populates ``REGISTRY``.
 """
 
 from src.providers import (  # noqa: F401  (imported for their @register side effects)
+    brave,
     crawl4ai,
     exa,
     firecrawl,

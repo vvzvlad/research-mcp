@@ -229,7 +229,7 @@ class Pipeline:
         if not search_instances:
             raise ConfigError(
                 "No search provider enabled. Set at least one of "
-                "SEARXNG_URL / SERPER_API_KEY / EXA_API_KEY."
+                "SEARXNG_URL / BRAVE_API_KEY / SERPER_API_KEY / EXA_API_KEY."
             )
         if not read_instances:
             raise ConfigError(

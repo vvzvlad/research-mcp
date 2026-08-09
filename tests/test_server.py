@@ -42,7 +42,7 @@ async def test_descriptions_are_verbatim_russian(server):
     by_name = {t.name: t for t in await server.list_tools()}
     ws = by_name["web_search"].description
     assert ws.startswith("Поиск в вебе. Агрегирует несколько источников")
-    assert "SearXNG-метапоиск + при наличии Serper/Exa" in ws
+    assert "SearXNG-метапоиск + при наличии Brave/Serper/Exa" in ws
     rp = by_name["read_page"].description
     assert rp.startswith("Скачать ОДНУ веб-страницу или PDF по url")
     assert "OCR нет" in rp

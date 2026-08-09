@@ -30,9 +30,12 @@ Providers are **plugins**. We separate:
 Which instances exist and the order each pipeline tries them is configured **in
 code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
 
-- **Search pipeline** (`searxng → serper → exa`): enabled instances run
+- **Search pipeline** (`searxng → brave → serper → exa`): enabled instances run
   concurrently; results are merged and deduplicated by normalized URL (earlier
   pipeline position wins), then trimmed to `num_results`.
+  `searxng` and `brave` additionally throttle themselves locally (one query per
+  45s and per 1.1s respectively, matching a measured upstream limit); when the
+  slot is taken they **skip** the current search instead of waiting for it.
 - **Read pipeline** (`trafilatura → jina → crawl4ai → tavily-1 → tavily-2 →
   firecrawl`): a single probe GET classifies the url. PDFs (Content-Type /
   `.pdf` / `%PDF` magic) are extracted with pypdf; for HTML, that same body is
@@ -78,7 +81,7 @@ non-secret knobs (all defaulted): `MCP_HOST`, `MCP_PORT`, `LOG_LEVEL`,
 per-call url cap is a fixed `20` (hard constant, matching the tool description) —
 not configurable.
 
-Provider env vars: `SEARXNG_URL`, `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`
+Provider env vars: `SEARXNG_URL`, `BRAVE_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`
 (optional), `CRAWL4AI_URL` + `CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`,
 `TAVILY_2_API_KEY`, `FIRECRAWL_API_KEY`.
 
@@ -86,7 +89,7 @@ Provider env vars: `SEARXNG_URL`, `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY
 
 Any external instance can be routed through its own **SOCKS5/HTTP proxy** by
 setting `<INSTANCE>_PROXY` — useful for clean egress past IP-based blocks (e.g.
-Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `SERPER_PROXY`,
+Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`,
 `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`. Internal
 instances (`searxng`, `crawl4ai`, `trafilatura`) have no proxy.
 

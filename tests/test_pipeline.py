@@ -13,6 +13,7 @@ import respx
 from src.pipeline import Pipeline
 from src.providers.base import ProviderError
 from src.providers.trafilatura import extract_markdown
+from tests.conftest import _clear_provider_env
 
 SAMPLE_PDF = (Path(__file__).parent / "fixtures" / "sample.pdf").read_bytes()
 
@@ -27,27 +28,6 @@ ARTICLE_HTML = (
 )
 
 THIN_HTML = "<html><body><div id='app'></div></body></html>"
-
-
-def _clear_provider_env(monkeypatch):
-    for var in (
-        "SEARXNG_URL",
-        "SERPER_API_KEY",
-        "EXA_API_KEY",
-        "JINA_API_KEY",
-        "CRAWL4AI_URL",
-        "CRAWL4AI_TOKEN",
-        "TAVILY_1_API_KEY",
-        "TAVILY_2_API_KEY",
-        "FIRECRAWL_API_KEY",
-        "SERPER_PROXY",
-        "EXA_PROXY",
-        "JINA_PROXY",
-        "TAVILY_1_PROXY",
-        "TAVILY_2_PROXY",
-        "FIRECRAWL_PROXY",
-    ):
-        monkeypatch.delenv(var, raising=False)
 
 
 # -- search merge + dedup --------------------------------------------------
@@ -96,6 +76,58 @@ async def test_search_merges_and_dedups(monkeypatch, settings):
     dup = [r for r in results if "dup.test" in r.url]
     assert len(dup) == 1
     assert dup[0].source == "searxng"
+
+
+@respx.mock
+async def test_search_dedup_prefers_brave_over_serper(monkeypatch, settings):
+    # SEARCH_PIPELINE puts brave ahead of serper, and dedup keeps the hit from the
+    # earlier provider — so a url both of them return must come back as brave's.
+    # This is the behavioural guard on that order (and on brave being wired into
+    # the pipeline at all).
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("BRAVE_API_KEY", "k")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+
+    respx.get("https://api.search.brave.com/res/v1/web/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "web": {
+                    "results": [
+                        {"url": "https://both.test/", "title": "Brave Dup", "description": "a"},
+                        {"url": "https://only-brave.test", "title": "Brave Only"},
+                    ]
+                }
+            },
+        )
+    )
+    respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "organic": [
+                    # Same url as brave (trailing slash diff) → deduped out.
+                    {"link": "https://both.test", "title": "Serper Dup", "snippet": "c"},
+                    {"link": "https://only-serper.test", "title": "Serper Only", "snippet": "d"},
+                ]
+            },
+        )
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        results = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    dup = [r for r in results if "both.test" in r.url]
+    assert len(dup) == 1
+    assert dup[0].source == "brave"
+    assert dup[0].title == "Brave Dup"
+    # Both providers still contribute their own hits.
+    urls = [r.url for r in results]
+    assert "https://only-brave.test" in urls
+    assert "https://only-serper.test" in urls
 
 
 @respx.mock
@@ -452,13 +484,16 @@ async def test_read_tls_verify_error_retries_insecure(monkeypatch, settings, cap
 
 @respx.mock
 async def test_transient_retry_then_success(monkeypatch, settings):
+    # serper, not searxng: the locally throttled providers (searxng, brave) opt
+    # out of retries on purpose — see the retries=0 comment in their modules —
+    # so they cannot demonstrate the shared transient-retry policy.
     _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
-    route = respx.get("http://searxng.test/search")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    route = respx.post("https://google.serper.dev/search")
     route.side_effect = [
         httpx.ConnectError("blip"),  # transient → retried
         httpx.Response(
-            200, json={"results": [{"url": "https://ok.test", "title": "OK", "content": "s"}]}
+            200, json={"organic": [{"link": "https://ok.test", "title": "OK", "snippet": "s"}]}
         ),
     ]
     pipe = Pipeline.build(settings)

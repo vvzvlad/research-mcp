@@ -20,8 +20,9 @@ a volume across restarts/image updates).
   `SearchResult`, `ProviderError`, `ProviderConfig`.
 - `src/providers/registry.py` — `@register` decorator + `REGISTRY`.
 - `src/providers/_http.py` — shared retry + 402/429 → failover policy.
-- `src/providers/<type>.py` — searxng/serper/exa (search); trafilatura/jina/
-  crawl4ai/tavily/firecrawl (read).
+- `src/providers/<type>.py` — searxng/brave/serper/exa (search); trafilatura/jina/
+  crawl4ai/tavily/firecrawl (read). searxng and brave self-throttle locally (one
+  query per 45s / 1.1s) and SKIP — never sleep — when the slot is taken.
 - `src/providers/pdf.py` — PDF detection + pypdf extraction (used by the pipeline, not a tool).
 - `src/pipeline_config.py` — `INSTANCES`, `SEARCH_PIPELINE`, `READ_PIPELINE`.
 - `src/pipeline.py` — instance loader, `ClientManager` (one httpx client per
@@ -42,7 +43,7 @@ a volume across restarts/image updates).
 
 ## Proxy (per instance)
 - An external instance can route through a SOCKS5/HTTP proxy via `<INSTANCE>_PROXY`
-  (`EXA_PROXY`, `SERPER_PROXY`, `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`,
+  (`EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`, `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`,
   `FIRECRAWL_PROXY`); internal instances (searxng/crawl4ai/trafilatura) have none.
 - `Instance.proxy_env` holds the ENV var NAME (never a value); the loader resolves
   it into `ProviderConfig.proxy`, exposed as `provider.proxy`.

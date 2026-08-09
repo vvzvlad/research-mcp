@@ -14,6 +14,38 @@ from src.providers.base import ProviderConfig
 from src.settings import Settings
 
 
+# Every provider ENV var the instance loader looks at. Tests clear them all
+# before setting the few they want, so a variable that happens to be exported in
+# the developer's shell cannot silently enable an extra instance. Lives here (not
+# in a test module) because several test modules need it — keep it in sync with
+# ``INSTANCES`` in src/pipeline_config.py.
+_PROVIDER_ENV_VARS = (
+    "SEARXNG_URL",
+    "BRAVE_API_KEY",
+    "SERPER_API_KEY",
+    "EXA_API_KEY",
+    "JINA_API_KEY",
+    "CRAWL4AI_URL",
+    "CRAWL4AI_TOKEN",
+    "TAVILY_1_API_KEY",
+    "TAVILY_2_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "BRAVE_PROXY",
+    "SERPER_PROXY",
+    "EXA_PROXY",
+    "JINA_PROXY",
+    "TAVILY_1_PROXY",
+    "TAVILY_2_PROXY",
+    "FIRECRAWL_PROXY",
+)
+
+
+def _clear_provider_env(monkeypatch) -> None:
+    """Unset every provider ENV var so a test controls the enabled instances."""
+    for var in _PROVIDER_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
 @pytest.fixture
 def capture_logs():
     """Capture loguru messages into a list of formatted strings for the test.

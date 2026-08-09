@@ -48,6 +48,9 @@ class Instance:
 INSTANCES: list[Instance] = [
     # --- search ---
     Instance("searxng", "searxng", url_env="SEARXNG_URL"),
+    # Brave reaches its API fine from this host directly (verified 2026-08-09);
+    # the proxy var exists only for symmetry with the other external instances.
+    Instance("brave", "brave", api_key_env="BRAVE_API_KEY", proxy_env="BRAVE_PROXY"),
     Instance("serper", "serper", api_key_env="SERPER_API_KEY", proxy_env="SERPER_PROXY"),
     Instance("exa", "exa", api_key_env="EXA_API_KEY", proxy_env="EXA_PROXY"),
     # --- read ---
@@ -64,7 +67,9 @@ INSTANCES: list[Instance] = [
 
 # Order in which enabled instances are tried. Search runs them concurrently and
 # merges; read tries them sequentially until one returns enough content.
-SEARCH_PIPELINE: list[str] = ["searxng", "serper", "exa"]
+# brave sits right after searxng: dedup keeps the hit from the EARLIER provider,
+# and brave has its own index and the best result quality of our paid options.
+SEARCH_PIPELINE: list[str] = ["searxng", "brave", "serper", "exa"]
 READ_PIPELINE: list[str] = [
     "trafilatura",
     "jina",
@@ -77,5 +82,10 @@ READ_PIPELINE: list[str] = [
 # Provider TYPES that bill per successful request (external metered APIs). Used
 # ONLY for usage accounting in the logs. Self-hosted / free types (searxng,
 # trafilatura, crawl4ai) are never counted as paid. jina is metered when an API
-# key is configured, so it is classified as paid.
-PAID_TYPES: frozenset[str] = frozenset({"serper", "exa", "jina", "tavily", "firecrawl"})
+# key is configured, so it is classified as paid. brave is metered too: the free
+# plan grants a 2000-queries-per-month quota and answers 429 once it is spent
+# (there is no overage on it); the paid plans are billed separately. It is listed
+# here because the accounting tracks metered external calls, not invoices.
+PAID_TYPES: frozenset[str] = frozenset(
+    {"brave", "serper", "exa", "jina", "tavily", "firecrawl"}
+)
