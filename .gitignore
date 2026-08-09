@@ -17,3 +17,5 @@ data/*
 !data/.gitkeep
 # Claude Code agent worktrees — never commit
 .claude/worktrees/
+# Production log snapshots pulled for analysis — contain real user queries
+tests/fixtures/prod-*.log
