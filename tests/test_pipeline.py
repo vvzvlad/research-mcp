@@ -13,6 +13,8 @@ import respx
 from src.pipeline import Pipeline
 from src.providers.base import ProviderError
 from src.providers.trafilatura import extract_markdown
+from src.rerank import RERANK_ENDPOINT
+from src.settings import Settings
 from tests.conftest import _clear_provider_env
 
 SAMPLE_PDF = (Path(__file__).parent / "fixtures" / "sample.pdf").read_bytes()
@@ -183,6 +185,169 @@ async def test_exa_clamps_num_results(monkeypatch, settings):
     import json as _json
 
     assert _json.loads(sent_body)["numResults"] == 50  # clamped to EXA_NUM_RESULTS_MAX
+
+
+# -- post-merge rerank ------------------------------------------------------
+
+
+def _mock_search_sources() -> None:
+    """Mock searxng (3 hits) + jina-search (empty) for the rerank tests.
+
+    JINA_API_KEY enables BOTH the reranker and the jina-search instance, so the
+    latter must be mocked too — an empty `data` keeps the merge deterministic
+    while still counting jina-search as a successful (billed) provider.
+    """
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"url": f"https://x.test/{i}", "title": f"t{i}", "content": f"s{i}"}
+                    for i in range(3)
+                ]
+            },
+        )
+    )
+    respx.post("https://s.jina.ai/").mock(
+        return_value=httpx.Response(200, json={"code": 200, "data": []})
+    )
+
+
+@respx.mock
+async def test_search_rerank_reorders_and_is_accounted(monkeypatch, settings, capture_logs):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("JINA_API_KEY", "jk")
+    _mock_search_sources()
+    respx.post(RERANK_ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"index": 2, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.5},
+                    {"index": 1, "relevance_score": 0.1},
+                ]
+            },
+        )
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        results = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    # The reranker's order wins over the merge order.
+    assert [r.url for r in results] == [
+        "https://x.test/2",
+        "https://x.test/0",
+        "https://x.test/1",
+    ]
+    line = next((m for m in capture_logs if m.startswith("search query=")), None)
+    assert line is not None
+    assert "reranked=true" in line
+    # jina-rerank is billed (jina-search + jina-rerank = 2 paid of 3 calls)...
+    assert "paid_calls=2" in line
+    # ...but it is NOT a search provider, so it stays out of providers=[...].
+    assert "providers=['searxng', 'jina-search']" in line
+
+
+@respx.mock
+async def test_search_rerank_failure_falls_back_to_merge_order(
+    monkeypatch, settings, capture_logs
+):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("JINA_API_KEY", "jk")
+    _mock_search_sources()
+    respx.post(RERANK_ENDPOINT).mock(return_value=httpx.Response(500))
+
+    pipe = Pipeline.build(settings)
+    try:
+        # Must NOT raise: a broken reranker degrades to the original order.
+        results = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    assert [r.url for r in results] == [
+        "https://x.test/0",
+        "https://x.test/1",
+        "https://x.test/2",
+    ]
+    line = next((m for m in capture_logs if m.startswith("search query=")), None)
+    assert line is not None
+    assert "reranked=false" in line
+    # The failed rerank call is not billed — only jina-search is paid here.
+    assert "paid_calls=1" in line
+
+
+@respx.mock
+async def test_search_rerank_empty_ranking_falls_back_to_merge_order(
+    monkeypatch, settings, capture_logs
+):
+    # A syntactically valid but EMPTY `results` envelope must not wipe the
+    # merged results: the reranker raises, the pipeline keeps the merge order
+    # and logs reranked=false — same graceful path as an HTTP failure.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("JINA_API_KEY", "jk")
+    _mock_search_sources()
+    respx.post(RERANK_ENDPOINT).mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        # Must NOT raise: the anomaly degrades to the original order.
+        results = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    assert [r.url for r in results] == [
+        "https://x.test/0",
+        "https://x.test/1",
+        "https://x.test/2",
+    ]
+    line = next((m for m in capture_logs if m.startswith("search query=")), None)
+    assert line is not None
+    assert "reranked=false" in line
+
+
+def test_build_passes_the_token_budget_only_to_jina(monkeypatch):
+    # The settings.jina_token_budget → build() → ProviderConfig.options wiring:
+    # the jina read instance gets the budget knob, everyone else gets none.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("JINA_API_KEY", "jk")
+
+    budgeted = Settings(_env_file=None, jina_token_budget=42)
+    pipe = Pipeline.build(budgeted, client=httpx.AsyncClient())
+
+    jina = next(p for p in pipe._read if p.name == "jina")
+    assert jina._config.options == {"token_budget": "42"}
+    # A non-jina instance must NOT inherit the knob.
+    trafilatura = next(p for p in pipe._read if p.name == "trafilatura")
+    assert trafilatura._config.options == {}
+
+
+def test_build_wires_the_reranker_only_when_enabled_and_keyed(monkeypatch, settings):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+
+    # No JINA_API_KEY → the step silently disables itself.
+    pipe = Pipeline.build(settings, client=httpx.AsyncClient())
+    assert pipe._reranker is None
+
+    # Key present + default flag → wired.
+    monkeypatch.setenv("JINA_API_KEY", "jk")
+    pipe = Pipeline.build(settings, client=httpx.AsyncClient())
+    assert pipe._reranker is not None
+
+    # Key present but the ops kill-switch off → no reranker.
+    off = Settings(_env_file=None, search_rerank_enabled=False)
+    pipe = Pipeline.build(off, client=httpx.AsyncClient())
+    assert pipe._reranker is None
 
 
 # -- read happy path + single-GET reuse ------------------------------------

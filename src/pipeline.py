@@ -6,7 +6,10 @@ At startup ``Pipeline.build`` resolves the ENV-variable NAMES from
 that at least one search and one read instance are enabled.
 
 Search runs all enabled ``SEARCH_PIPELINE`` instances concurrently, merges and
-deduplicates by normalized url (pipeline order wins), and trims to ``num_results``.
+deduplicates by normalized url (pipeline order wins), optionally reranks the
+full merged list with the Jina reranker (``src/rerank.py`` — enabled by
+``JINA_API_KEY`` + ``settings.search_rerank_enabled``, falls back to the merge
+order on any failure), and trims to ``num_results``.
 
 Read first detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic) and
 extracts them with pypdf. Otherwise it tries the enabled ``READ_PIPELINE``
@@ -46,6 +49,7 @@ from src.providers.base import (
 from src.providers.pdf import extract_pdf_text, looks_like_pdf
 from src.providers.registry import REGISTRY
 from src.providers.trafilatura import TrafilaturaRead, extract_markdown
+from src.rerank import JinaReranker
 from src.settings import Settings
 
 
@@ -158,10 +162,15 @@ class Pipeline:
         read_instances: list[ReadProvider],
         client: httpx.AsyncClient | None = None,
         paid_names: set[str] | frozenset[str] | None = None,
+        reranker: JinaReranker | None = None,
     ) -> None:
         self._settings = settings
         self._search = search_instances
         self._read = read_instances
+        # Post-merge reranker (None = step disabled). Not a pipeline instance:
+        # it transforms the merged list instead of producing results, so it is
+        # wired separately from the provider lists.
+        self._reranker = reranker
         # Names of the enabled instances whose TYPE bills per successful request.
         self._paid: frozenset[str] = frozenset(paid_names or ())
         # Cumulative BILLED counters for this process: paid calls and total
@@ -197,6 +206,14 @@ class Pipeline:
             if cls_impl is None:
                 logger.warning("Unknown provider type '{}' for instance '{}'", inst.type, inst.name)
                 continue
+            # Provider-specific knobs travel in `options` — the designated
+            # slot per ProviderConfig's docstring, so no dedicated config
+            # field is added per provider.
+            options: dict[str, str] = {}
+            if inst.type == "jina":
+                # Per-request token cap for the Reader; jina.py sends it as
+                # X-Token-Budget only in keyed (billed) mode.
+                options["token_budget"] = str(settings.jina_token_budget)
             # Carry shared knobs into the provider config.
             config = ProviderConfig(
                 name=config.name,
@@ -207,6 +224,7 @@ class Pipeline:
                 api_key=config.api_key,
                 token=config.token,
                 proxy=config.proxy,
+                options=options,
             )
             if config.proxy:
                 logger.info("Provider instance '{}' routes via proxy", inst.name)
@@ -229,7 +247,8 @@ class Pipeline:
         if not search_instances:
             raise ConfigError(
                 "No search provider enabled. Set at least one of "
-                "SEARXNG_URL / BRAVE_API_KEY / SERPER_API_KEY / EXA_API_KEY."
+                "SEARXNG_URL / BRAVE_API_KEY / JINA_API_KEY / SERPER_API_KEY / "
+                "EXA_API_KEY."
             )
         if not read_instances:
             raise ConfigError(
@@ -237,12 +256,27 @@ class Pipeline:
                 "should not happen — check src/pipeline_config.py."
             )
 
+        # The post-merge reranker rides on the same key (and proxy) as the
+        # other jina instances. Env access belongs here in build() like every
+        # other secret lookup — rerank code never touches os.environ. No key →
+        # the step silently disables itself; settings.search_rerank_enabled is
+        # the explicit ops kill-switch on top of that.
+        reranker: JinaReranker | None = None
+        jina_key = os.getenv("JINA_API_KEY")
+        if settings.search_rerank_enabled and jina_key:
+            reranker = JinaReranker(jina_key, proxy=os.getenv("JINA_PROXY"))
+            # The rerank call is metered (input tokens), so its name joins the
+            # paid set for the per-request accounting.
+            paid_names.add(reranker.name)
+            logger.info("Search rerank enabled (jina-reranker-v3.5)")
+
         return cls(  # type: ignore[arg-type]
             settings,
             search_instances,
             read_instances,
             client=client,
             paid_names=paid_names,
+            reranker=reranker,
         )
 
     async def aclose(self) -> None:
@@ -263,7 +297,10 @@ class Pipeline:
         """Fold one request's billed upstream calls into the cumulative counters.
 
         `billed` = names of provider instances whose upstream call returned data
-        (a billed 200; thin results count, raised/errored calls do not). Returns
+        (a billed 200; thin results count, raised/errored calls do not). The
+        list may also carry the pseudo-instance name "jina-rerank" for a
+        successful rerank call — deliberately not an Instance in
+        pipeline_config, so do not look for it in INSTANCES. Returns
         (paid_calls_this_request, cumulative_paid_percent). Mutates the counters
         synchronously (no await), so it is safe under asyncio.gather concurrency.
         """
@@ -320,19 +357,49 @@ class Pipeline:
                     continue
                 seen.add(key)
                 merged.append(result)
+
+        # Rerank BEFORE the trim, on the FULL merged list — that is the point:
+        # the reranker picks the best num_results from everything the providers
+        # brought, instead of trimming blindly by pipeline order and shuffling
+        # the surviving prefix. This is a serial await after the concurrent
+        # provider gather, so its latency lands on every web_search; accepted
+        # for the ordering quality, and settings.search_rerank_enabled is the
+        # off-switch. A single result (or none) has nothing to reorder.
+        reranked = False
+        if self._reranker is not None and len(merged) > 1:
+            try:
+                merged = await self._reranker.rerank(
+                    self._clients.client_for(self._reranker.proxy),
+                    query,
+                    merged,
+                    top_n=num_results,
+                )
+                reranked = True
+            except ProviderError as exc:
+                # Graceful degradation: keep the original merge order below.
+                logger.info("search rerank failed: {}", exc)
+            except Exception as exc:  # noqa: BLE001 — never break the search
+                logger.warning("search rerank failed: {}", exc)
         merged = merged[:num_results]
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         # The billed calls are exactly `used`: each successful search provider
-        # returned data (a billed 200). Fold them into the cumulative counters.
-        paid_calls, pct = self._account(used)
+        # returned data (a billed 200) — plus the rerank call when it went
+        # through (metered too). A rerank that answered 200 with an anomalous
+        # body (empty/malformed ranking → ProviderError) is deliberately NOT
+        # billed, consistent with search providers whose response failed to
+        # parse. The rerank joins only the accounting list, never the
+        # providers=[...] one: it produced no results of its own.
+        billed = [*used, self._reranker.name] if reranked and self._reranker else used
+        paid_calls, pct = self._account(billed)
         # One per-request line for the persistent log (no bodies/secrets).
         logger.info(
-            "search query={!r} providers={} results={} paid_calls={} "
+            "search query={!r} providers={} results={} reranked={} paid_calls={} "
             "cum_paid={} cum_calls={} paid_pct={:.1f}% elapsed_ms={}",
             query,
             used,
             len(merged),
+            "true" if reranked else "false",
             paid_calls,
             self._cum_paid,
             self._cum_calls,
@@ -403,7 +470,11 @@ class Pipeline:
             except Exception as exc:  # noqa: BLE001 — treat as provider failure
                 errors.append(f"{provider.name}: {exc}")
                 continue
-            # Returned without raising → a billed 200 (even if too thin).
+            # Returned without raising → a billed 200 (even if too thin). One
+            # jina success may hide an extra billed upstream call (the
+            # readerlm-v2 escalation, 3x-priced) not reflected here — the
+            # provider emits its "readerlm-v2 escalation" log line only after
+            # that call returned, so those lines count the extra billed calls.
             billed.append(provider.name)
             if len(content) >= self._settings.fallback_min_chars:
                 _log_ok(provider.name)

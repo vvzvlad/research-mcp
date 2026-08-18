@@ -20,13 +20,17 @@ a volume across restarts/image updates).
   `SearchResult`, `ProviderError`, `ProviderConfig`.
 - `src/providers/registry.py` — `@register` decorator + `REGISTRY`.
 - `src/providers/_http.py` — shared retry + 402/429 → failover policy.
-- `src/providers/<type>.py` — searxng/brave/serper/exa (search); trafilatura/jina/
-  crawl4ai/tavily/firecrawl (read). searxng and brave self-throttle locally (one
-  query per 45s / 1.1s) and SKIP — never sleep — when the slot is taken.
+- `src/providers/<type>.py` — searxng/brave/jina_search/serper/exa (search);
+  trafilatura/jina/crawl4ai/tavily/firecrawl (read). searxng and brave
+  self-throttle locally (one query per 45s / 1.1s) and SKIP — never sleep —
+  when the slot is taken.
 - `src/providers/pdf.py` — PDF detection + pypdf extraction (used by the pipeline, not a tool).
 - `src/pipeline_config.py` — `INSTANCES`, `SEARCH_PIPELINE`, `READ_PIPELINE`.
 - `src/pipeline.py` — instance loader, `ClientManager` (one httpx client per
-  proxy URL), search (merge/dedup) and read (fallback) logic.
+  proxy URL), search (merge/dedup/rerank) and read (fallback) logic.
+- `src/rerank.py` — `JinaReranker`: post-merge rerank of search results
+  (jina-reranker-v3.5; enabled by `JINA_API_KEY` + `SEARCH_RERANK_ENABLED`,
+  falls back to the merge order on any failure).
 - `src/settings.py` — non-secret knobs only (all defaulted), incl. log file config.
 - `src/server.py` — `build_server()` with the 3 `@mcp.tool` definitions.
 - `main.py` — thin entry point: stderr + persistent file sink, build server, run streamable-http.

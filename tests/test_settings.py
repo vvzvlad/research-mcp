@@ -11,6 +11,8 @@ def test_defaults_present():
     assert s.fallback_min_chars == 400
     assert s.read_pages_concurrency == 5
     assert s.retries == 1
+    assert s.search_rerank_enabled is True
+    assert s.jina_token_budget == 100_000
 
 
 def test_read_pages_max_is_not_a_setting():

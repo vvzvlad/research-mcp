@@ -30,9 +30,13 @@ Providers are **plugins**. We separate:
 Which instances exist and the order each pipeline tries them is configured **in
 code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
 
-- **Search pipeline** (`searxng → brave → serper → exa`): enabled instances run
-  concurrently; results are merged and deduplicated by normalized URL (earlier
-  pipeline position wins), then trimmed to `num_results`.
+- **Search pipeline** (`searxng → brave → jina-search → serper → exa`): enabled
+  instances run concurrently; results are merged and deduplicated by normalized
+  URL (earlier pipeline position wins). When `JINA_API_KEY` is set (and
+  `SEARCH_RERANK_ENABLED` is not turned off), the full merged list is then
+  reranked by `jina-reranker-v3.5` so the trim to `num_results` keeps the most
+  relevant hits instead of a blind pipeline-order prefix; any rerank failure
+  falls back to the merge order.
   `searxng` and `brave` additionally throttle themselves locally (one query per
   45s and per 1.1s respectively, matching a measured upstream limit); when the
   slot is taken they **skip** the current search instead of waiting for it.
@@ -77,13 +81,15 @@ All config comes from ENV / `.env` (see `.env.example`). Provider secrets/URLs
 are read by **name** in the instance loader, not declared as Settings fields. The
 non-secret knobs (all defaulted): `MCP_HOST`, `MCP_PORT`, `LOG_LEVEL`,
 `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `REQUEST_TIMEOUT`,
-`FALLBACK_MIN_CHARS`, `READ_PAGES_CONCURRENCY`, `RETRIES`. The `read_pages`
+`FALLBACK_MIN_CHARS`, `READ_PAGES_CONCURRENCY`, `RETRIES`,
+`SEARCH_RERANK_ENABLED`, `JINA_TOKEN_BUDGET`. The `read_pages`
 per-call url cap is a fixed `20` (hard constant, matching the tool description) —
 not configurable.
 
 Provider env vars: `SEARXNG_URL`, `BRAVE_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`
-(optional), `CRAWL4AI_URL` + `CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`,
-`TAVILY_2_API_KEY`, `FIRECRAWL_API_KEY`.
+(one key enables the `jina` reader in keyed mode, the `jina-search` provider and
+the search reranker; the reader alone also works keyless), `CRAWL4AI_URL` +
+`CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`, `TAVILY_2_API_KEY`, `FIRECRAWL_API_KEY`.
 
 ## Proxy
 
@@ -131,6 +137,7 @@ the log file across updates) — we never build on prod.
 | `src/providers/pdf.py` | PDF detection + pypdf text extraction (used by the pipeline). |
 | `src/pipeline_config.py` | In-code instances + pipeline order. |
 | `src/pipeline.py` | Instance loader + search/read logic. |
+| `src/rerank.py` | `JinaReranker` — post-merge rerank of search results. |
 | `src/settings.py` | Non-secret knobs (pydantic-settings). |
 | `src/server.py` | `build_server()` with the 3 `@mcp.tool` definitions. |
 | `main.py` | Thin entry point: build server, run streamable-http. |
