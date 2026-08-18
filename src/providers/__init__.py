@@ -14,6 +14,7 @@ from src.providers import (  # noqa: F401  (imported for their @register side ef
     exa,
     firecrawl,
     jina,
+    jina_search,
     searxng,
     serper,
     tavily,

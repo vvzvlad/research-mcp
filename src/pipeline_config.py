@@ -51,6 +51,11 @@ INSTANCES: list[Instance] = [
     # Brave reaches its API fine from this host directly (verified 2026-08-09);
     # the proxy var exists only for symmetry with the other external instances.
     Instance("brave", "brave", api_key_env="BRAVE_API_KEY", proxy_env="BRAVE_PROXY"),
+    # Reuses the same key (and the same token pool) as the jina reader below.
+    # Unlike the reader, s.jina.ai refuses keyless access, so the key is
+    # REQUIRED here — no optional_api_key — and the instance simply
+    # auto-disables when JINA_API_KEY is unset.
+    Instance("jina-search", "jina_search", api_key_env="JINA_API_KEY", proxy_env="JINA_PROXY"),
     Instance("serper", "serper", api_key_env="SERPER_API_KEY", proxy_env="SERPER_PROXY"),
     Instance("exa", "exa", api_key_env="EXA_API_KEY", proxy_env="EXA_PROXY"),
     # --- read ---
@@ -69,7 +74,11 @@ INSTANCES: list[Instance] = [
 # merges; read tries them sequentially until one returns enough content.
 # brave sits right after searxng: dedup keeps the hit from the EARLIER provider,
 # and brave has its own index and the best result quality of our paid options.
-SEARCH_PIPELINE: list[str] = ["searxng", "brave", "serper", "exa"]
+# The order past brave is the dedup preference by cost: the free/quota providers
+# (searxng, brave) first, then jina-search at a fixed ~$0.0005/query, then
+# serper (its key is dead but the instance is kept wired), then exa — the most
+# expensive of the lot.
+SEARCH_PIPELINE: list[str] = ["searxng", "brave", "jina-search", "serper", "exa"]
 READ_PIPELINE: list[str] = [
     "trafilatura",
     "jina",
@@ -87,5 +96,5 @@ READ_PIPELINE: list[str] = [
 # (there is no overage on it); the paid plans are billed separately. It is listed
 # here because the accounting tracks metered external calls, not invoices.
 PAID_TYPES: frozenset[str] = frozenset(
-    {"brave", "serper", "exa", "jina", "tavily", "firecrawl"}
+    {"brave", "serper", "exa", "jina", "jina_search", "tavily", "firecrawl"}
 )

@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     read_pages_concurrency: int = 5
     # Extra retry attempts for transient HTTP failures (per provider request).
     retries: int = 1
+    # Ops kill-switch for the post-merge search rerank (jina-reranker-v3.5).
+    # The step also silently disables itself when JINA_API_KEY is unset, so
+    # this flag only matters on keyed deployments — flip it off when the added
+    # serial latency (or the token spend) is not worth the ordering quality.
+    search_rerank_enabled: bool = True
+    # Cap on Jina Reader tokens per request, sent as X-Token-Budget in keyed
+    # mode (~$0.005 per maxed-out request at the $50/1B pack) so one
+    # pathological mega-page cannot eat a chunk of the balance. 0 disables the
+    # header entirely.
+    jina_token_budget: int = 100_000
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

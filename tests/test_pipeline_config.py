@@ -12,6 +12,7 @@ from src.config_errors import ConfigError
 from src.pipeline import Pipeline, _resolve_instance
 from src.pipeline_config import INSTANCES, PAID_TYPES, READ_PIPELINE, SEARCH_PIPELINE
 from src.providers.brave import BraveSearch
+from src.providers.jina_search import JinaSearch
 from tests.conftest import _clear_provider_env
 
 
@@ -44,17 +45,20 @@ def test_paid_types_classification():
     # Self-hosted / free types are never billed.
     for free in ("searxng", "trafilatura", "crawl4ai"):
         assert free not in PAID_TYPES
-    # External metered APIs are billed (jina is metered when keyed; brave's free
-    # plan gives 2000 queries a month and then 429s, paid plans bill separately —
-    # what is tracked here is metered external calls, not invoices).
-    for paid in ("brave", "serper", "exa", "jina", "tavily", "firecrawl"):
+    # External metered APIs are billed (jina is metered when keyed, jina_search
+    # always needs a key; brave's free plan gives 2000 queries a month and then
+    # 429s, paid plans bill separately — what is tracked here is metered
+    # external calls, not invoices).
+    for paid in ("brave", "serper", "exa", "jina", "jina_search", "tavily", "firecrawl"):
         assert paid in PAID_TYPES
 
 
 def test_search_pipeline_order():
-    # Order is load-bearing: dedup keeps the hit from the earlier provider, and
-    # brave (own index, best quality of the paid ones) must outrank serper/exa.
-    assert SEARCH_PIPELINE == ["searxng", "brave", "serper", "exa"]
+    # Order is load-bearing: dedup keeps the hit from the earlier provider. The
+    # free/quota providers (searxng, brave) go first, then jina-search at a
+    # fixed ~$0.0005/query, then serper (dead key, kept wired), then exa (the
+    # most expensive).
+    assert SEARCH_PIPELINE == ["searxng", "brave", "jina-search", "serper", "exa"]
 
 
 def test_every_pipeline_name_has_an_instance():
@@ -77,6 +81,19 @@ def test_brave_instance_is_wired():
     assert not brave.optional_api_key  # no key → no brave
     assert brave.url_env is None
     assert brave.token_env is None
+
+
+def test_jina_search_instance_is_wired():
+    # jina-search deliberately reuses the reader's env vars (one key, one
+    # proxy) — and unlike the reader, its key is REQUIRED: s.jina.ai blocks
+    # keyless access, so the instance must auto-disable without JINA_API_KEY.
+    jina_search = _inst("jina-search")
+    assert jina_search.type == "jina_search"
+    assert jina_search.api_key_env == "JINA_API_KEY"
+    assert jina_search.proxy_env == "JINA_PROXY"
+    assert not jina_search.optional_api_key  # no key → no jina-search
+    assert jina_search.url_env is None
+    assert jina_search.token_env is None
 
 
 def test_importing_the_providers_package_registers_every_type():
@@ -126,6 +143,18 @@ def test_build_enables_brave_from_its_key(monkeypatch, settings):
     brave = next(p for p in pipe._search if p.name == "brave")
     assert isinstance(brave, BraveSearch)
     assert brave.proxy is None  # no BRAVE_PROXY → direct egress
+
+
+def test_build_enables_jina_search_from_the_shared_jina_key(monkeypatch, settings):
+    # End-to-end wiring: JINA_API_KEY alone yields BOTH a jina-search search
+    # provider and the (always-on) jina reader in keyed mode.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("JINA_API_KEY", "k")
+    pipe = Pipeline.build(settings, client=httpx.AsyncClient())
+    assert pipe.search_names == ["jina-search"]
+    jina_search = next(p for p in pipe._search if p.name == "jina-search")
+    assert isinstance(jina_search, JinaSearch)
+    assert "jina" in pipe.read_names  # the same key feeds the reader
 
 
 def test_resolve_disabled_when_key_missing(monkeypatch):
