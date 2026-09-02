@@ -116,8 +116,8 @@ jobs:
       run: |
         tag_args=""
         for tag in $TAGS; do tag_args="$tag_args --tag $tag"; done
-        # --pull is required here: unlike GitHub's ephemeral runners, cirunner-hatbox
-        # is self-hosted with a persistent docker daemon, so a once-pulled
+        # --pull is required here: unlike GitHub's ephemeral runners, the self-hosted
+        # runner has a persistent docker daemon, so a once-pulled
         # python:3.11-slim would sit in its cache for months and every build would
         # inherit an unpatched base layer.
         docker build --pull . --file Dockerfile $tag_args

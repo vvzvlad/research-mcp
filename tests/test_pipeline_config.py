@@ -188,10 +188,10 @@ def test_resolve_proxy_absent_is_none(monkeypatch):
 def test_resolve_proxy_present_is_used(monkeypatch):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("EXA_API_KEY", "k")
-    monkeypatch.setenv("EXA_PROXY", "socks5://internal.lc:1080")
+    monkeypatch.setenv("EXA_PROXY", "socks5://proxy.invalid:1080")
     config = _resolve_instance(_inst("exa"))
     assert config is not None
-    assert config.proxy == "socks5://internal.lc:1080"
+    assert config.proxy == "socks5://proxy.invalid:1080"
 
 
 def test_missing_proxy_does_not_disable_instance(monkeypatch):
@@ -210,10 +210,10 @@ def test_build_threads_proxy_into_provider(monkeypatch, settings):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
     monkeypatch.setenv("EXA_API_KEY", "k")
-    monkeypatch.setenv("EXA_PROXY", "socks5://internal.lc:1080")
+    monkeypatch.setenv("EXA_PROXY", "socks5://proxy.invalid:1080")
     pipe = Pipeline.build(settings, client=httpx.AsyncClient())
     exa = next(p for p in pipe._search if p.name == "exa")
-    assert exa.proxy == "socks5://internal.lc:1080"
+    assert exa.proxy == "socks5://proxy.invalid:1080"
     # searxng (internal) has no proxy.
     searxng = next(p for p in pipe._search if p.name == "searxng")
     assert searxng.proxy is None

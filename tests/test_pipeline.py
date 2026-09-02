@@ -821,7 +821,7 @@ async def test_proxied_provider_still_serves(monkeypatch, settings):
     # intercepts above the SOCKS transport, so the request still succeeds.
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("EXA_API_KEY", "k")
-    monkeypatch.setenv("EXA_PROXY", "socks5://internal.lc:1080")
+    monkeypatch.setenv("EXA_PROXY", "socks5://proxy.invalid:1080")
     respx.post("https://api.exa.ai/search").mock(
         return_value=httpx.Response(
             200, json={"results": [{"url": "https://e.test", "title": "Exa via proxy"}]}
@@ -832,7 +832,7 @@ async def test_proxied_provider_still_serves(monkeypatch, settings):
         results = await pipe.search("q", num_results=5, page=1, language=None)
         assert any(r.url == "https://e.test" for r in results)
         # The proxied exa client is distinct from the direct client.
-        proxied = pipe._clients.client_for("socks5://internal.lc:1080")
+        proxied = pipe._clients.client_for("socks5://proxy.invalid:1080")
         direct = pipe._clients.client_for(None)
         assert proxied is not direct
     finally:

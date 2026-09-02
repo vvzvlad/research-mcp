@@ -19,3 +19,7 @@ data/*
 .claude/worktrees/
 # Production log snapshots pulled for analysis — contain real user queries
 tests/fixtures/prod-*.log
+# Rendered production usage reports — contain real per-day counters and visited domains.
+# The whole directory is generated dumps: nothing in it is tracked or referenced, and a
+# report saved under a different name must not slip through into a public repository.
+docs/stats/
