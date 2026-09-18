@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # cap is a hard constant in server.py — see READ_PAGES_MAX — so the tool's
     # "up to 20" promise stays true regardless of environment overrides.)
     read_pages_concurrency: int = 5
+    # Per-page cap on the markdown a BATCH read returns (read_pages and
+    # search_and_read): past it the text is cut and an explicit marker names how
+    # many characters were dropped, so the model knows it is not seeing the whole
+    # page. A single read_page is NEVER truncated — asking for one url is asking
+    # for all of it; the cap exists because 20 unbounded pages wreck the context
+    # window. 0 disables the cut.
+    read_batch_max_chars: int = 20_000
     # Extra retry attempts for transient HTTP failures (per provider request).
     retries: int = 1
     # Ops kill-switch for the post-merge search rerank (jina-reranker-v3.5).

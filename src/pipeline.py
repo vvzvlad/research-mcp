@@ -9,19 +9,29 @@ Search runs all enabled ``SEARCH_PIPELINE`` instances concurrently, merges and
 deduplicates by normalized url (pipeline order wins), optionally reranks the
 full merged list with the Jina reranker (``src/rerank.py`` — enabled by
 ``JINA_API_KEY`` + ``settings.search_rerank_enabled``, falls back to the merge
-order on any failure), and trims to ``num_results``.
+order on any failure), and trims to ``num_results``. It returns a
+``SearchOutcome``: the results plus which instances answered, came back empty
+or failed — so the caller can tell "nothing matched" from "the search itself
+broke".
 
 Read first detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic) and
 extracts them with pypdf. Otherwise it tries the enabled ``READ_PIPELINE``
 instances in order; the first to return content ``>= fallback_min_chars`` wins;
-thin/empty/error → next instance. If all fail, it raises ``ProviderError`` with
-an aggregated message.
+thin/empty/error → next instance. It returns a ``ReadOutcome``: the markdown
+plus the winning provider, the chain that was walked and every failure along the
+way tagged with a ``src.failure_reason`` category. If all fail, it raises
+``ReadFailed`` (a ``ProviderError``) carrying the same telemetry.
+
+``search_and_read`` composes the two: it runs an over-fetched search and reads
+the top hits in waves (each wave only as wide as the previous one's failures)
+until ``num_results`` pages have opened, returning a ``SearchReadOutcome``.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 import os
 import ssl
 import time
@@ -30,6 +40,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from loguru import logger
 
+from src import failure_reason
 from src.config_errors import ConfigError
 from src.pipeline_config import (
     INSTANCES,
@@ -53,6 +64,109 @@ from src.providers.registry import REGISTRY
 from src.providers.trafilatura import TrafilaturaRead, extract_markdown
 from src.rerank import JinaReranker
 from src.settings import Settings
+
+
+@dataclass(slots=True)
+class SearchOutcome:
+    """One search request: its results plus what the instances actually did.
+
+    The three buckets are disjoint and together cover ``attempted``: an instance
+    either answered with hits, answered with nothing, or failed. They exist so a
+    caller can tell an honestly empty result set ("nobody has this") from a dead
+    search ("every provider fell over"), which look identical when only
+    ``results`` is returned.
+    """
+
+    results: list[SearchResult]  # merged, deduped, reranked, trimmed
+    attempted: list[str]  # instances launched, in pipeline order
+    answered: list[str]  # returned at least one hit
+    empty: list[str]  # returned without error but zero hits
+    failed: list[str]  # raised ProviderError or crashed
+    failed_reasons: list[str]  # why, one src.failure_reason per entry of `failed`
+    hits_before_dedup: int  # total hits across the answering providers
+    reranked: bool
+    elapsed_ms: int
+
+
+@dataclass(slots=True)
+class ReadOutcome:
+    """One read request: the markdown plus how the pipeline got hold of it.
+
+    ``provider`` is the instance that won (``"pdf"`` for the PDF path, which no
+    instance serves), ``tried`` is the chain walked up to and including it, and
+    ``failures`` pairs every instance that did not deliver with its
+    ``src.failure_reason`` category. ``thin`` marks the last-resort branch: every
+    instance came back under ``fallback_min_chars`` and the longest of those
+    scraps is what is being returned.
+    """
+
+    markdown: str
+    provider: str
+    tried: list[str]
+    failures: list[tuple[str, str]]  # (instance, reason constant)
+    thin: bool
+    elapsed_ms: int
+
+
+@dataclass(slots=True)
+class ReadItem:
+    """One entry of a ``SearchReadOutcome``: a search hit plus what reading it gave.
+
+    The search fields always carry the hit as the search returned it; the read
+    fields are mutually exclusive — ``ok`` means ``markdown``, otherwise
+    ``error`` (the message) and ``reason`` (a ``src.failure_reason`` constant,
+    for the caller to label).
+    """
+
+    title: str
+    url: str
+    snippet: str
+    ok: bool
+    markdown: str | None = None
+    error: str | None = None
+    reason: str | None = None
+
+
+@dataclass(slots=True)
+class SearchReadOutcome:
+    """One search_and_read request: the entries plus what they cost.
+
+    ``search`` is the underlying search (over-fetched, so its result count is
+    larger than ``items``), ``candidates`` is how many hits it brought back and
+    ``read_attempts`` how many of them a read was actually spent on — the two
+    numbers that say how much of the over-fetch the failures ate.
+    """
+
+    items: list[ReadItem]  # ok first in search order, then failed; <= num_results
+    search: SearchOutcome
+    candidates: int
+    read_attempts: int
+
+
+class ReadFailed(ProviderError):
+    """Every read method failed. Carries the telemetry of the failed attempt.
+
+    A plain ``ProviderError`` by inheritance — callers that only want the message
+    keep working — with ``tried`` / ``failures`` attached for the ones that want
+    to tell the model *why* nothing opened.
+    """
+
+    def __init__(self, message: str, tried: list[str], failures: list[tuple[str, str]]) -> None:
+        super().__init__(message)
+        self.tried = tried
+        self.failures = failures
+
+
+def classify_read_failure(exc: BaseException) -> str:
+    """The one failure category to report for a url that did not open.
+
+    A ``ReadFailed`` already carries a classified reason per provider, so the
+    dominant one speaks for the whole chain; anything else (the SSRF guard, an
+    unexpected crash) is classified on the spot.
+    """
+    if isinstance(exc, ReadFailed):
+        return failure_reason.dominant_reason(exc.failures)
+    return failure_reason.classify(exc)
 
 
 def _is_tls_verify_error(exc: Exception) -> bool:
@@ -347,8 +461,12 @@ class Pipeline:
         """Fold one request's billed upstream calls into the cumulative counters.
 
         `billed` = names of provider instances whose upstream call returned data
-        (a billed 200; thin results count, raised/errored calls do not). The
-        list may also carry the pseudo-instance name "jina-rerank" for a
+        (a billed 200; thin read results count, raised/errored calls do not). A
+        search instance that answered with ZERO hits is NOT billed either
+        (SearXNG alive but its engines blocked, a keyed provider returning an
+        empty page): it stays out of BOTH counters, so the ratio keeps a single
+        meaning — of the calls that actually bought data, how many were paid.
+        The list may also carry the pseudo-instance name "jina-rerank" for a
         successful rerank call — deliberately not an Instance in
         pipeline_config, so do not look for it in INSTANCES. Returns
         (paid_calls_this_request, cumulative_paid_percent). Mutates the counters
@@ -368,39 +486,57 @@ class Pipeline:
         num_results: int,
         page: int,
         language: str | None,
-    ) -> list[SearchResult]:
-        """Run all search instances concurrently, merge + dedup, trim."""
+    ) -> SearchOutcome:
+        """Run all search instances concurrently, merge + dedup, trim.
+
+        Returns a ``SearchOutcome`` — the results plus the per-instance
+        answered/empty/failed telemetry.
+        """
         # Defend the public method too: a non-positive count would otherwise
         # silently return nothing. (The server already does max(1, ...).)
         num_results = max(1, num_results)
         started = time.monotonic()
 
-        async def _one(provider: SearchProvider) -> tuple[str, list[SearchResult] | None]:
-            # Returns (name, results) where results is None if the provider
-            # failed/crashed (so it is NOT counted as "really worked"). Each
-            # provider uses the client bound to ITS proxy (None = direct).
+        async def _one(provider: SearchProvider) -> tuple[str, list[SearchResult] | None, str]:
+            # Returns (name, results, reason) where results is None if the
+            # provider failed/crashed (so it is NOT counted as "really worked")
+            # and reason is its failure category (empty string when it worked).
+            # Each provider uses the client bound to ITS proxy (None = direct).
             client = self._clients.client_for(provider.proxy)
             try:
                 hits = await provider.search(client, query, num_results, page, language)
-                return provider.name, hits
+                return provider.name, hits, ""
             except ProviderError as exc:
                 logger.info("search '{}' failed: {}", provider.name, exc)
-                return provider.name, None
+                return provider.name, None, failure_reason.classify(exc)
             except Exception as exc:  # noqa: BLE001 — never break the merge
                 logger.warning("search '{}' crashed: {}", provider.name, exc)
-                return provider.name, None
+                return provider.name, None, failure_reason.classify(exc)
 
+        attempted = [p.name for p in self._search]
         # Gather in pipeline order; results keep that order so dedup prefers the
         # earlier (higher-priority) provider.
         batches = await asyncio.gather(*(_one(p) for p in self._search))
 
-        used: list[str] = []
+        # Three disjoint buckets, filled from what _one already distinguishes:
+        # None = the instance failed, [] = it answered with nothing.
+        answered: list[str] = []
+        empty: list[str] = []
+        failed: list[str] = []
+        failed_reasons: list[str] = []
+        hits_before_dedup = 0
         merged: list[SearchResult] = []
         seen: set[str] = set()
-        for name, hits in batches:
+        for name, hits, reason in batches:
             if hits is None:
+                failed.append(name)
+                failed_reasons.append(reason or failure_reason.OTHER)
                 continue
-            used.append(name)
+            if not hits:
+                empty.append(name)
+                continue
+            answered.append(name)
+            hits_before_dedup += len(hits)
             for result in hits:
                 key = _normalize_url(result.url)
                 if key in seen:
@@ -433,21 +569,25 @@ class Pipeline:
         merged = merged[:num_results]
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        # The billed calls are exactly `used`: each successful search provider
-        # returned data (a billed 200) — plus the rerank call when it went
-        # through (metered too). A rerank that answered 200 with an anomalous
+        # The billed calls are exactly `answered`: those providers returned data
+        # (a billed 200) — plus the rerank call when it went through (metered
+        # too). An instance that answered with zero hits bought nothing, so it
+        # stays out (see _account). A rerank that answered 200 with an anomalous
         # body (empty/malformed ranking → ProviderError) is deliberately NOT
         # billed, consistent with search providers whose response failed to
         # parse. The rerank joins only the accounting list, never the
         # providers=[...] one: it produced no results of its own.
-        billed = [*used, self._reranker.name] if reranked and self._reranker else used
+        billed = [*answered, self._reranker.name] if reranked and self._reranker else answered
         paid_calls, pct = self._account(billed)
         # One per-request line for the persistent log (no bodies/secrets).
         logger.info(
-            "search query={!r} providers={} results={} reranked={} paid_calls={} "
-            "cum_paid={} cum_calls={} paid_pct={:.1f}% elapsed_ms={}",
+            "search query={!r} providers={} empty={} failed={} reasons={} results={} "
+            "reranked={} paid_calls={} cum_paid={} cum_calls={} paid_pct={:.1f}% elapsed_ms={}",
             query,
-            used,
+            answered,
+            empty,
+            failed,
+            failed_reasons,
             len(merged),
             "true" if reranked else "false",
             paid_calls,
@@ -456,15 +596,25 @@ class Pipeline:
             pct,
             elapsed_ms,
         )
-        return merged
+        return SearchOutcome(
+            results=merged,
+            attempted=attempted,
+            answered=answered,
+            empty=empty,
+            failed=failed,
+            failed_reasons=failed_reasons,
+            hits_before_dedup=hits_before_dedup,
+            reranked=reranked,
+            elapsed_ms=elapsed_ms,
+        )
 
     # -- read ---------------------------------------------------------------
 
-    async def read(self, url: str) -> str:
-        """Return clean Markdown for ``url`` (PDF-aware, with provider fallback).
+    async def read(self, url: str) -> ReadOutcome:
+        """Read ``url`` (PDF-aware, with provider fallback) into a ``ReadOutcome``.
 
-        Raises ``ProviderError`` if every method fails, or ``UrlNotAllowed`` (a
-        ``ProviderError``) if the url points into the internal network.
+        Raises ``ReadFailed`` if every method fails, or ``UrlNotAllowed`` (both
+        are ``ProviderError``) if the url points into the internal network.
         """
         # SSRF entry check: a blocked url costs zero HTTP requests and gets a
         # clean error. The guarded clients re-check the same url when the probe
@@ -481,6 +631,10 @@ class Pipeline:
         # content without raising (a billed 200; thin results count too).
         tried: list[str] = []
         billed: list[str] = []
+        # Model-facing telemetry: one (instance, reason) pair per attempt that
+        # did not deliver — the structured twin of the `errors` texts below, so
+        # both lists stay in step.
+        failures: list[tuple[str, str]] = []
 
         def _log_ok(provider_name: str, suffix: str = "") -> None:
             # Fold the billed calls into the cumulative counters and emit the
@@ -537,7 +691,15 @@ class Pipeline:
         if pdf_text is not None:
             if pdf_text != NO_TEXT_LAYER_NOTICE:
                 _log_ok("pdf")
-                return pdf_text
+                # tried stays empty: the probe is not a provider call.
+                return ReadOutcome(
+                    markdown=pdf_text,
+                    provider="pdf",
+                    tried=list(tried),
+                    failures=list(failures),
+                    thin=False,
+                    elapsed_ms=_ms(),
+                )
             pdf_notice = pdf_text
 
         # 2) HTML path: walk the read pipeline until one yields enough content.
@@ -550,9 +712,11 @@ class Pipeline:
                 content = await self._read_one(provider, url, probe_html)
             except ProviderError as exc:
                 errors.append(str(exc))
+                failures.append((provider.name, failure_reason.classify(exc)))
                 continue
             except Exception as exc:  # noqa: BLE001 — treat as provider failure
                 errors.append(f"{provider.name}: {exc}")
+                failures.append((provider.name, failure_reason.classify(exc)))
                 continue
             # Returned without raising → a billed 200 (even if too thin). One
             # jina success may hide up to three extra billed upstream calls
@@ -564,27 +728,56 @@ class Pipeline:
             billed.append(provider.name)
             if len(content) >= self._settings.fallback_min_chars:
                 _log_ok(provider.name)
-                return content
+                return ReadOutcome(
+                    markdown=content,
+                    provider=provider.name,
+                    tried=list(tried),
+                    failures=list(failures),
+                    thin=False,
+                    elapsed_ms=_ms(),
+                )
             # Too thin — remember the longest thin result as a last resort.
             if best_thin is None or len(content) > len(best_thin):
                 best_thin = content
                 best_thin_name = provider.name
             errors.append(f"{provider.name}: content too thin ({len(content)} chars)")
+            failures.append((provider.name, failure_reason.EMPTY))
 
         if best_thin:
             _log_ok(best_thin_name or "", suffix=" (thin fallback)")
-            return best_thin
+            return ReadOutcome(
+                markdown=best_thin,
+                provider=best_thin_name or "",
+                tried=list(tried),
+                failures=list(failures),
+                thin=True,
+                elapsed_ms=_ms(),
+            )
         if pdf_notice:
             # Scanned PDF and nothing in the chain could read it either: hand
-            # back the same notice this branch returned before OCR existed.
+            # back the same notice this branch returned before OCR existed. The
+            # winner is still "pdf" — the notice came from the probe, not from a
+            # provider — while `tried`/`failures` carry the chain that was spent
+            # trying to OCR it.
             _log_ok("pdf", suffix=" (no text layer)")
-            return pdf_notice
+            return ReadOutcome(
+                markdown=pdf_notice,
+                provider="pdf",
+                tried=list(tried),
+                failures=list(failures),
+                thin=False,
+                elapsed_ms=_ms(),
+            )
         paid_calls, pct = self._account(billed)
         logger.warning(
-            "read url={} -> FAILED ok=false tried={} paid_calls={} cum_paid={} "
+            "read url={} -> FAILED ok=false tried={} reasons={} paid_calls={} cum_paid={} "
             "cum_calls={} paid_pct={:.1f}% elapsed_ms={} errors={}",
             url,
             tried,
+            # Flat categories, like the search line's reasons= — the instance
+            # names are already in tried=, and a grep over reasons= must see the
+            # same shape in both lines.
+            [reason for _, reason in failures],
             paid_calls,
             self._cum_paid,
             self._cum_calls,
@@ -592,7 +785,11 @@ class Pipeline:
             _ms(),
             "; ".join(errors),
         )
-        raise ProviderError("Не удалось прочитать страницу. " + "; ".join(errors))
+        raise ReadFailed(
+            "Не удалось прочитать страницу. " + "; ".join(errors),
+            tried=list(tried),
+            failures=list(failures),
+        )
 
     async def _read_one(self, provider: ReadProvider, url: str, probe_html: str | None) -> str:
         """Run one read provider, reusing the probe body for trafilatura.
@@ -683,3 +880,100 @@ class Pipeline:
                 return response
         except httpx.HTTPError:
             return None
+
+    # -- search + read (combined) -------------------------------------------
+
+    async def search_and_read(
+        self,
+        query: str,
+        num_results: int,
+        page: int,
+        language: str | None,
+        candidates: int,
+    ) -> SearchReadOutcome:
+        """Search, then read the top hits, and return both in one outcome.
+
+        Pure composition of ``search`` and ``read``: every provider decision,
+        failover and per-request log line stays where it already lives.
+
+        ``candidates`` is the OVER-FETCHED search count, computed by the caller
+        (the tool owns the cap on how many results a search may ask for): some
+        urls never open, so the search is asked for more hits than the
+        ``num_results`` pages we owe. Those extra candidates are NOT all read up
+        front — a read costs money — but in WAVES: the first ``num_results``
+        candidates are read concurrently under ``read_pages_concurrency``, and
+        each following wave reads exactly as many untouched candidates as the
+        previous wave failed to open, until enough pages are in hand or the
+        candidates run out.
+        """
+        num_results = max(1, num_results)
+        # A caller that asked for fewer candidates than pages would cap the
+        # answer below what it requested; the over-fetch is never negative.
+        candidates = max(num_results, candidates)
+        outcome = await self.search(query, candidates, page, language)
+        hits = outcome.results
+
+        semaphore = asyncio.Semaphore(self._settings.read_pages_concurrency)
+
+        async def _one(hit: SearchResult) -> ReadItem:
+            # Never raises: a url that did not open becomes a failed entry, so a
+            # single dead link cannot take the whole wave down.
+            async with semaphore:
+                try:
+                    read = await self.read(hit.url)
+                except ProviderError as exc:
+                    error, reason = str(exc), classify_read_failure(exc)
+                except Exception as exc:  # noqa: BLE001 — never break the wave
+                    error = f"Непредвиденная ошибка: {exc}"
+                    reason = classify_read_failure(exc)
+                else:
+                    return ReadItem(
+                        title=hit.title,
+                        url=hit.url,
+                        snippet=hit.snippet,
+                        ok=True,
+                        markdown=read.markdown,
+                    )
+            return ReadItem(
+                title=hit.title,
+                url=hit.url,
+                snippet=hit.snippet,
+                ok=False,
+                error=error,
+                reason=reason,
+            )
+
+        opened: list[ReadItem] = []
+        failed: list[ReadItem] = []
+        next_hit = 0
+        attempts = 0
+        while len(opened) < num_results and next_hit < len(hits):
+            # Take exactly what is still missing: num_results on the first pass,
+            # then one candidate per url the previous wave failed to open.
+            wave = hits[next_hit : next_hit + (num_results - len(opened))]
+            next_hit += len(wave)
+            attempts += len(wave)
+            for item in await asyncio.gather(*(_one(hit) for hit in wave)):
+                (opened if item.ok else failed).append(item)
+
+        # Pages that opened come first, in search order; the failed ones fill
+        # whatever is left of the quota, so the list never exceeds num_results.
+        items = opened[:num_results]
+        items.extend(failed[: num_results - len(items)])
+
+        # Per-url lines are emitted by read() and the query line by search();
+        # this one ties them together with what the over-fetch actually cost.
+        logger.info(
+            "search_and_read query={!r} candidates={} attempts={} read={} results={}",
+            query,
+            len(hits),
+            attempts,
+            len(opened),
+            len(items),
+        )
+        return SearchReadOutcome(
+            items=items,
+            search=outcome,
+            candidates=len(hits),
+            read_attempts=attempts,
+        )

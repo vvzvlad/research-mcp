@@ -61,10 +61,11 @@ class SearxngSearch:
         # (median gap between our searches is 2s; ~88% of them would wait).
         #
         # Raise ProviderError instead of returning []: Pipeline._one() catches it,
-        # logs "search '<name>' failed: ..." and leaves the instance out of the
-        # providers=[...] list. An empty list would instead be recorded as a
-        # successful (and billed-looking) run and the log would claim searxng took
-        # part when it did not.
+        # logs "search '<name>' failed: ..." and the instance lands in failed=[...]
+        # rather than empty=[...]. That distinction is load-bearing — returning []
+        # would claim searxng ran and found nothing, and in a searxng-only
+        # deployment format_search_results would then render a skipped slot as
+        # "ничего не найдено" instead of a search failure.
         #
         # The check and the assignment are adjacent with no await between them, so
         # under asyncio they are atomic — no lock is needed here, do not add one.

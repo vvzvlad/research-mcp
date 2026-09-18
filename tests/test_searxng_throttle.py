@@ -196,9 +196,9 @@ async def test_throttled_searxng_does_not_break_the_search(
 
     pipe = Pipeline.build(settings)
     try:
-        first = await pipe.search("q", num_results=10, page=1, language=None)
+        first = (await pipe.search("q", num_results=10, page=1, language=None)).results
         clock.advance(2.0)  # our median gap between searches
-        second = await pipe.search("q", num_results=10, page=1, language=None)
+        second = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -208,6 +208,8 @@ async def test_throttled_searxng_does_not_break_the_search(
 
     lines = [m for m in capture_logs if m.startswith("search query=")]
     assert len(lines) == 2
-    assert "'searxng'" in lines[0]
-    assert "'searxng'" not in lines[1]  # excluded, not silently counted as used
-    assert "'exa'" in lines[1]
+    assert "providers=['searxng', 'exa']" in lines[0]
+    # Excluded from providers=[...] — the skip is recorded as a failure, never
+    # silently counted as an instance that took part.
+    assert "providers=['exa']" in lines[1]
+    assert "failed=['searxng']" in lines[1]

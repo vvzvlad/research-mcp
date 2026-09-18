@@ -111,7 +111,7 @@ async def test_allow_private_network_reads_the_private_url(monkeypatch):
 
     pipe = Pipeline.build(_permissive_settings())
     try:
-        out = await pipe.read(PRIVATE_URL)
+        out = (await pipe.read(PRIVATE_URL)).markdown
     finally:
         await pipe.aclose()
 
@@ -149,7 +149,7 @@ async def test_malformed_hostname_does_not_raise_out_of_read(monkeypatch, settin
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
 
@@ -173,7 +173,7 @@ async def test_unresolvable_host_is_allowed_through(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
 

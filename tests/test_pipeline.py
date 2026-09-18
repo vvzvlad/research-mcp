@@ -4,13 +4,15 @@ All network I/O is mocked with respx. Pipelines are built via ``Pipeline.build``
 with monkeypatched provider ENV so we control exactly which instances are on.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
-from src.pipeline import Pipeline
+from src.formatting import format_search_results
+from src.pipeline import Pipeline, ReadFailed
 from src.providers.base import ProviderError
 from src.providers.pdf import NO_TEXT_LAYER_NOTICE
 from src.providers.trafilatura import extract_markdown
@@ -68,7 +70,7 @@ async def test_search_merges_and_dedups(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=10, page=1, language=None)
+        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -119,7 +121,7 @@ async def test_search_dedup_prefers_brave_over_serper(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=10, page=1, language=None)
+        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -145,7 +147,7 @@ async def test_search_trims_to_num_results(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=3, page=1, language=None)
+        results = (await pipe.search("q", num_results=3, page=1, language=None)).results
     finally:
         await pipe.aclose()
     assert len(results) == 3
@@ -163,7 +165,7 @@ async def test_search_clamps_non_positive_num_results(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=0, page=1, language=None)
+        results = (await pipe.search("q", num_results=0, page=1, language=None)).results
     finally:
         await pipe.aclose()
     assert len(results) == 1  # clamped up to 1, not empty
@@ -188,6 +190,137 @@ async def test_exa_clamps_num_results(monkeypatch, settings):
     assert _json.loads(sent_body)["numResults"] == 50  # clamped to EXA_NUM_RESULTS_MAX
 
 
+# -- search outcome: a dead search vs an empty one -------------------------
+
+
+@respx.mock
+async def test_search_all_instances_failing_renders_as_a_failure(monkeypatch, settings):
+    # Every launched instance raises → the rendered answer must say the SEARCH
+    # broke (retry is worth it), not that the topic does not exist.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    respx.get("http://searxng.test/search").mock(return_value=httpx.Response(500))
+    respx.post("https://google.serper.dev/search").mock(return_value=httpx.Response(429))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.results == []
+    assert outcome.attempted == ["searxng", "serper"]
+    assert outcome.failed == ["searxng", "serper"]
+    assert outcome.answered == []
+    assert outcome.empty == []
+
+    rendered = format_search_results(outcome, query="q", page=1)
+    assert "ничего не найдено" not in rendered.lower()
+    assert "сбой поиска" in rendered.lower()
+    # ...and it is a different text from the one the same query gets when an
+    # instance really answered with nothing.
+    answered_nothing = replace(outcome, answered=["searxng"], failed=["serper"])
+    assert rendered != format_search_results(answered_nothing, query="q", page=1)
+
+
+@respx.mock
+async def test_search_empty_instance_answers_render_as_nothing_found(monkeypatch, settings):
+    # 200 + zero hits from every instance (SearXNG alive, engines blocked) is an
+    # honestly empty result — the unchanged "ничего не найдено" text.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(200, json={"organic": []})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.results == []
+    assert outcome.empty == ["searxng", "serper"]
+    assert outcome.answered == []
+    assert outcome.failed == []
+
+    rendered = format_search_results(outcome, query="ничего такого", page=2)
+    assert "ничего не найдено" in rendered.lower()
+    assert "ничего такого" in rendered
+
+
+@respx.mock
+async def test_empty_instance_answer_is_not_billed(monkeypatch, settings, capture_logs):
+    # serper is a PAID instance, but a 200 with zero hits bought nothing, so it
+    # must not move the paid counters — only searxng's answering call is counted.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(
+            200, json={"results": [{"url": "https://sx.test", "title": "Sx", "content": "a"}]}
+        )
+    )
+    respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(200, json={"organic": []})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    line = next((m for m in capture_logs if m.startswith("search query=")), None)
+    assert line is not None
+    assert "empty=['serper']" in line
+    assert "paid_calls=0" in line
+    assert "cum_paid=0" in line
+    assert "cum_calls=1" in line  # searxng only — the empty serper call is free
+
+
+@respx.mock
+async def test_search_log_reports_empty_and_failed_instances(monkeypatch, settings, capture_logs):
+    # One instance answers, one answers with nothing, one fails — the per-request
+    # line must keep the three apart instead of collapsing them into providers=.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    monkeypatch.setenv("EXA_API_KEY", "k")
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(
+            200, json={"results": [{"url": "https://sx.test", "title": "Sx", "content": "a"}]}
+        )
+    )
+    respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(200, json={"organic": []})
+    )
+    respx.post("https://api.exa.ai/search").mock(return_value=httpx.Response(429))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.hits_before_dedup == 1
+    line = next((m for m in capture_logs if m.startswith("search query=")), None)
+    assert line is not None
+    assert "providers=['searxng']" in line
+    assert "empty=['serper']" in line
+    assert "failed=['exa']" in line
+    assert "results=1" in line
+    # The wiring the model actually depends on: a real provider failure (exa
+    # answers 429 here) is classified and lands aligned with `failed`.
+    assert outcome.failed_reasons == ["rate-limit"]
+    assert "reasons=['rate-limit']" in line
+
+
 # -- post-merge rerank ------------------------------------------------------
 
 
@@ -196,7 +329,7 @@ def _mock_search_sources() -> None:
 
     JINA_API_KEY enables BOTH the reranker and the jina-search instance, so the
     latter must be mocked too — an empty `data` keeps the merge deterministic
-    while still counting jina-search as a successful (billed) provider.
+    and lands jina-search in the `empty=[...]` bucket (answered, but unbilled).
     """
     respx.get("http://searxng.test/search").mock(
         return_value=httpx.Response(
@@ -235,7 +368,7 @@ async def test_search_rerank_reorders_and_is_accounted(monkeypatch, settings, ca
 
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=10, page=1, language=None)
+        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -248,10 +381,13 @@ async def test_search_rerank_reorders_and_is_accounted(monkeypatch, settings, ca
     line = next((m for m in capture_logs if m.startswith("search query=")), None)
     assert line is not None
     assert "reranked=true" in line
-    # jina-rerank is billed (jina-search + jina-rerank = 2 paid of 3 calls)...
-    assert "paid_calls=2" in line
-    # ...but it is NOT a search provider, so it stays out of providers=[...].
-    assert "providers=['searxng', 'jina-search']" in line
+    # jina-rerank is billed; jina-search answered with zero hits, so it is not
+    # (1 paid of 2 billed calls: searxng + jina-rerank).
+    assert "paid_calls=1" in line
+    # jina-rerank is NOT a search provider, so it stays out of providers=[...],
+    # and the empty jina-search moves to empty=[...].
+    assert "providers=['searxng']" in line
+    assert "empty=['jina-search']" in line
 
 
 @respx.mock
@@ -267,7 +403,7 @@ async def test_search_rerank_failure_falls_back_to_merge_order(
     pipe = Pipeline.build(settings)
     try:
         # Must NOT raise: a broken reranker degrades to the original order.
-        results = await pipe.search("q", num_results=10, page=1, language=None)
+        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -279,8 +415,9 @@ async def test_search_rerank_failure_falls_back_to_merge_order(
     line = next((m for m in capture_logs if m.startswith("search query=")), None)
     assert line is not None
     assert "reranked=false" in line
-    # The failed rerank call is not billed — only jina-search is paid here.
-    assert "paid_calls=1" in line
+    # The failed rerank call is not billed, and the empty jina-search is not
+    # either → no paid call at all on this request.
+    assert "paid_calls=0" in line
 
 
 @respx.mock
@@ -301,7 +438,7 @@ async def test_search_rerank_empty_ranking_falls_back_to_merge_order(
     pipe = Pipeline.build(settings)
     try:
         # Must NOT raise: the anomaly degrades to the original order.
-        results = await pipe.search("q", num_results=10, page=1, language=None)
+        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -364,7 +501,7 @@ async def test_read_html_uses_single_get(monkeypatch, settings):
     route = respx.get(url).mock(return_value=httpx.Response(200, text=ARTICLE_HTML))
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
     assert "main article body" in out
@@ -390,7 +527,7 @@ async def test_read_recreates_client_after_aclose(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)  # no injected client → pipeline creates it
 
-    first = await pipe.read(url)
+    first = (await pipe.read(url)).markdown
     assert "main article body" in first
 
     # Simulate the premature lifespan shutdown that closed the shared client.
@@ -398,7 +535,7 @@ async def test_read_recreates_client_after_aclose(monkeypatch, settings):
 
     # Same call again must succeed via a recreated client, not raise the
     # "client has been closed" error.
-    second = await pipe.read(url)
+    second = (await pipe.read(url)).markdown
     assert "main article body" in second
 
     await pipe.aclose()
@@ -426,10 +563,63 @@ async def test_read_fallback_trafilatura_thin_jina_error_crawl4ai_ok(monkeypatch
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        outcome = await pipe.read(url)
     finally:
         await pipe.aclose()
-    assert "Crawl4AI result" in out
+    assert "Crawl4AI result" in outcome.markdown
+    # The telemetry the status line is built from: who won, what was walked to
+    # get there, and why each earlier instance did not deliver.
+    assert outcome.provider == "crawl4ai"
+    assert outcome.tried == ["trafilatura", "jina", "crawl4ai"]
+    assert outcome.failures == [("trafilatura", "empty"), ("jina", "other")]
+    assert outcome.thin is False
+    assert outcome.elapsed_ms >= 0
+
+
+@respx.mock
+async def test_read_all_fail_raises_read_failed_with_reasons(monkeypatch, settings):
+    # A dead url: every instance fails, and the raised error carries the chain
+    # and the categorized reasons (read_pages turns them into a per-url reason).
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+
+    url = "https://dead.test/x"
+    respx.get(url).mock(side_effect=httpx.ConnectError("Name or service not known"))
+    respx.get(f"https://r.jina.ai/{url}").mock(
+        side_effect=httpx.ConnectError("Name or service not known")
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ReadFailed) as caught:
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert isinstance(caught.value, ProviderError)  # old callers keep working
+    assert "Не удалось прочитать страницу" in str(caught.value)
+    assert caught.value.tried == ["trafilatura", "jina"]
+    assert [reason for _, reason in caught.value.failures] == ["dns", "dns"]
+
+
+@respx.mock
+async def test_read_pdf_outcome_names_the_pdf_path(monkeypatch, settings):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    url = "https://files.test/doc.pdf"
+    respx.get(url).mock(
+        return_value=httpx.Response(
+            200, content=SAMPLE_PDF, headers={"Content-Type": "application/pdf"}
+        )
+    )
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    # The probe extracted it: no provider instance was entered at all.
+    assert outcome.provider == "pdf"
+    assert outcome.tried == []
 
 
 @respx.mock
@@ -455,7 +645,7 @@ async def test_read_tavily_1_429_fails_over_to_tavily_2(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
     assert "Tavily-2 extracted content" in out
@@ -498,7 +688,7 @@ async def test_read_pdf_probe_403_falls_through_to_provider(monkeypatch, setting
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)  # must NOT raise ProviderError
+        out = (await pipe.read(url)).markdown  # must NOT raise ProviderError
     finally:
         await pipe.aclose()
     assert "PDF via jina" in out
@@ -528,7 +718,7 @@ async def test_read_pdf_200_nonpdf_body_falls_through_to_provider(monkeypatch, s
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)  # must NOT raise ProviderError
+        out = (await pipe.read(url)).markdown  # must NOT raise ProviderError
     finally:
         await pipe.aclose()
     assert "PDF via jina" in out
@@ -572,6 +762,10 @@ async def test_read_pdf_200_nonpdf_body_no_provider_raises_normal_failure(
     assert "tried=[" in line
     assert "tried=[]" not in line
     assert "pdf probe failed" not in line
+    # Flat categories, the same shape as the search line's reasons= — log greps
+    # aggregate both, so the form must not drift back to (name, reason) pairs.
+    assert "reasons=['" in line
+    assert "reasons=[(" not in line
 
 
 # -- PDF detection ---------------------------------------------------------
@@ -589,7 +783,7 @@ async def test_read_pdf_by_suffix(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
     assert "Hello PDF research-mcp" in out
@@ -608,7 +802,7 @@ async def test_read_pdf_by_magic_bytes(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
     assert "Hello PDF research-mcp" in out
@@ -637,7 +831,7 @@ async def test_read_tls_verify_error_retries_insecure(monkeypatch, settings, cap
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
     assert "Hello PDF research-mcp" in out
@@ -664,7 +858,7 @@ async def test_transient_retry_then_success(monkeypatch, settings):
     ]
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=5, page=1, language=None)
+        results = (await pipe.search("q", num_results=5, page=1, language=None)).results
     finally:
         await pipe.aclose()
     assert any(r.url == "https://ok.test" for r in results)
@@ -830,7 +1024,7 @@ async def test_proxied_provider_still_serves(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=5, page=1, language=None)
+        results = (await pipe.search("q", num_results=5, page=1, language=None)).results
         assert any(r.url == "https://e.test" for r in results)
         # The proxied exa client is distinct from the direct client.
         proxied = pipe._clients.client_for("socks5://proxy.invalid:1080")
@@ -838,6 +1032,147 @@ async def test_proxied_provider_still_serves(monkeypatch, settings):
         assert proxied is not direct
     finally:
         await pipe.aclose()
+
+
+# -- search_and_read: over-fetch + read waves ------------------------------
+
+
+def _mock_search_hits(count: int) -> list[str]:
+    """Make searxng answer with ``count`` hits; return their urls in order."""
+    urls = [f"https://hit.test/{i}" for i in range(count)]
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"url": url, "title": f"t{i}", "content": f"s{i}"}
+                    for i, url in enumerate(urls)
+                ]
+            },
+        )
+    )
+    return urls
+
+
+def _mock_readable(url: str):
+    """That url opens: the probe GET hands trafilatura an extractable article."""
+    return respx.get(url).mock(return_value=httpx.Response(200, text=ARTICLE_HTML))
+
+
+def _mock_dead(url: str):
+    """That url opens nowhere: the probe AND the keyless jina reader both fail."""
+    route = respx.get(url).mock(side_effect=httpx.ConnectError("nope"))
+    respx.get(f"https://r.jina.ai/{url}").mock(side_effect=httpx.ConnectError("nope"))
+    return route
+
+
+@respx.mock
+async def test_search_and_read_tops_up_after_failed_reads(monkeypatch, settings):
+    # Two of the first three candidates do not open, so the next wave reads
+    # exactly two more: the answer still carries the requested 3 pages.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    urls = _mock_search_hits(8)
+    for index, url in enumerate(urls):
+        (_mock_dead if index in (0, 2) else _mock_readable)(url)
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search_and_read(
+            "q", num_results=3, page=1, language=None, candidates=8
+        )
+    finally:
+        await pipe.aclose()
+
+    assert [item.url for item in outcome.items] == [urls[1], urls[3], urls[4]]
+    assert all(item.ok for item in outcome.items)
+    # Wave 1 read candidates 0-2 (two of them failed), wave 2 read 3-4.
+    assert outcome.read_attempts == 5
+    assert outcome.candidates == 8
+    # Each entry is the search hit AND its content, which is the whole point.
+    first = outcome.items[0]
+    assert (first.title, first.snippet) == ("t1", "s1")
+    assert "main article body" in (first.markdown or "")
+    assert first.error is None and first.reason is None
+    # The underlying search travels with the entries.
+    assert outcome.search.answered == ["searxng"]
+
+
+@respx.mock
+async def test_search_and_read_fills_the_remainder_with_failures(monkeypatch, settings):
+    # The candidates run out before 3 pages open: the failed urls fill what is
+    # left of the quota, and the list never grows past num_results.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    urls = _mock_search_hits(4)
+    _mock_readable(urls[0])
+    for url in urls[1:]:
+        _mock_dead(url)
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search_and_read(
+            "q", num_results=3, page=1, language=None, candidates=4
+        )
+    finally:
+        await pipe.aclose()
+
+    assert len(outcome.items) == 3  # never longer than num_results
+    assert outcome.read_attempts == 4  # every candidate was tried
+    assert [item.ok for item in outcome.items] == [True, False, False]
+    # Successes first in search order, then the failures — and the 4th
+    # candidate's failure is dropped: it does not fit in the quota.
+    assert [item.url for item in outcome.items] == [urls[0], urls[1], urls[2]]
+    failed = outcome.items[1]
+    assert failed.markdown is None
+    assert failed.reason == "network"  # the category, ready to be labelled
+    assert "Не удалось прочитать страницу" in (failed.error or "")
+
+
+@respx.mock
+async def test_search_and_read_reads_no_more_urls_than_needed(monkeypatch, settings):
+    # A read costs money: with 10 candidates and 2 pages requested, exactly the
+    # first two candidates may be fetched.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    urls = _mock_search_hits(10)
+    routes = [_mock_readable(url) for url in urls]
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search_and_read(
+            "q", num_results=2, page=1, language=None, candidates=10
+        )
+    finally:
+        await pipe.aclose()
+
+    assert outcome.read_attempts == 2
+    assert outcome.candidates == 10  # the over-fetch still happened...
+    assert [route.call_count for route in routes[:2]] == [1, 1]
+    assert all(route.call_count == 0 for route in routes[2:])  # ...but cost nothing
+
+
+@respx.mock
+async def test_search_and_read_emits_a_summary_log(monkeypatch, settings, capture_logs):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    urls = _mock_search_hits(4)
+    _mock_dead(urls[0])
+    for url in urls[1:]:
+        _mock_readable(url)
+
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.search_and_read("q", num_results=2, page=1, language=None, candidates=4)
+    finally:
+        await pipe.aclose()
+
+    line = next((m for m in capture_logs if m.startswith("search_and_read query=")), None)
+    assert line is not None
+    assert "candidates=4" in line
+    assert "attempts=3" in line  # wave 1 read two urls, one failed → one more
+    assert "read=2" in line
+    assert "results=2" in line
 
 
 # -- trafilatura extraction contract (fix C) ------------------------------
@@ -892,8 +1227,9 @@ async def test_scanned_pdf_falls_through_to_the_read_chain(monkeypatch, settings
     finally:
         await pipe.aclose()
 
-    assert "Scanned page, read by jina" in out
-    assert out != NO_TEXT_LAYER_NOTICE
+    assert "Scanned page, read by jina" in out.markdown
+    assert out.markdown != NO_TEXT_LAYER_NOTICE
+    assert out.provider == "jina"  # the OCR tier won, not the probe
 
 
 @respx.mock
@@ -916,6 +1252,10 @@ async def test_scanned_pdf_keeps_the_notice_when_the_chain_finds_nothing(
     finally:
         await pipe.aclose()
 
-    assert out == NO_TEXT_LAYER_NOTICE
+    assert out.markdown == NO_TEXT_LAYER_NOTICE
+    # The notice came from the probe, so "pdf" is the winner, while `tried`
+    # carries the chain that was spent trying to OCR it.
+    assert out.provider == "pdf"
+    assert out.tried
     # Reported as a success, the way it was before the fall-through existed.
     assert any("ok=true" in line and "no text layer" in line for line in capture_logs)

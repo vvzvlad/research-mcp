@@ -1,7 +1,7 @@
 # Agent Instructions — research-mcp
 
 An MCP "facade" that hides a pyramid of search/read providers behind a single
-streamable-http MCP endpoint and exposes **3 clean tools** with good Russian help
+streamable-http MCP endpoint and exposes **4 clean tools** with good Russian help
 texts. No auth in the app: Traefik + basicAuth on the host handles it. No
 application state — the only thing persisted is a log file under `data/` (kept on
 a volume across restarts/image updates).
@@ -33,12 +33,23 @@ a volume across restarts/image updates).
 - `src/providers/pdf.py` — PDF detection + pypdf extraction (used by the pipeline, not a tool).
 - `src/pipeline_config.py` — `INSTANCES`, `SEARCH_PIPELINE`, `READ_PIPELINE`.
 - `src/pipeline.py` — instance loader, `ClientManager` (one httpx client per
-  proxy URL), search (merge/dedup/rerank) and read (fallback) logic.
+  proxy URL), search (merge/dedup/rerank) and read (fallback) logic, plus
+  `search_and_read` — their composition: an over-fetched search whose top hits
+  are read in waves until enough pages opened.
 - `src/rerank.py` — `JinaReranker`: post-merge rerank of search results
   (jina-reranker-v3.5; enabled by `JINA_API_KEY` + `SEARCH_RERANK_ENABLED`,
   falls back to the merge order on any failure).
 - `src/settings.py` — non-secret knobs only (all defaulted), incl. log file config.
-- `src/server.py` — `build_server()` with the 3 `@mcp.tool` definitions.
+- `src/formatting.py` — pure renderers of the LLM-facing texts: the results list
+  and the one-line status line a tool answer carries (who answered, what was
+  dropped, what broke and why, elapsed) — on results, on an empty result and on
+  a failed read alike; only a url rejected by the SSRF guard has none.
+- `src/failure_reason.py` — pure `classify(exc)` → one failure category
+  (`timeout`/`rate-limit`/`no-credits`/`access-denied`/`bot-protection`/`tls`/
+  `dns`/`network`/`empty`/`other`); the pipeline tags every provider failure with
+  one and `formatting` renders its Russian label.
+- `src/server.py` — `build_server()` with the 4 `@mcp.tool` definitions (whose
+  descriptions cross-reference each other: when to take this tool, when another).
 - `main.py` — thin entry point: stderr + persistent file sink, build server, run streamable-http.
 - `data/` — runtime state (persistent log file; gitignored, mounted as a volume).
 - `tests/` — pytest (network mocked with respx).
@@ -47,9 +58,12 @@ a volume across restarts/image updates).
 - stderr + a persistent file sink at `data/research-mcp.log` (loguru rotation +
   retention; survives restart/image update via the `data/` volume).
 - `pipeline.search` / `pipeline.read` emit one per-request line each (tool,
-  target url/query, winning provider/tier or `pdf`, count, latency, ok);
-  `read_pages` adds a `count/ok` summary. Never log bodies or secrets (proxy
-  URLs and keys are never logged).
+  target url/query, winning provider/tier or `pdf`, count, latency, ok); the
+  search line also names the instances that came back `empty=` and those that
+  `failed=`, with their `reasons=` categories (the failed read line carries them
+  too); `read_pages` adds a `count/ok` summary and `search_and_read` a
+  `candidates/attempts/read` one. Never log bodies or secrets
+  (proxy URLs and keys are never logged).
 
 ## Proxy (per instance)
 - An external instance can route through a SOCKS5/HTTP proxy via `<INSTANCE>_PROXY`
