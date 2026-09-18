@@ -56,11 +56,22 @@ INSTANCES: list[Instance] = [
     # REQUIRED here — no optional_api_key — and the instance simply
     # auto-disables when JINA_API_KEY is unset.
     Instance("jina-search", "jina_search", api_key_env="JINA_API_KEY", proxy_env="JINA_PROXY"),
-    # Tavily and Firecrawl sell search and extract off ONE key: the read
-    # instances below already carry these vars, and the search half of both free
-    # monthly allowances (1000 and ~500 calls) was going unused. So these two
-    # instances cost nothing new and need no extra secret — they light up the
-    # moment the reader key is present.
+    # Tavily and Firecrawl sell search and extract off ONE key, so these two
+    # need no new secret and light up the moment the reader key is present.
+    #
+    # They are NOT free, though: the key has ONE monthly pool, shared by both
+    # products. Measured on our own Tavily key 2026-09-18: plan_usage 12 =
+    # search 4 + extract 8, against plan_limit 1000. Search runs on every
+    # web_search while the tavily/firecrawl READERS sit 4th and 6th in the read
+    # chain and win ~1% of reads (19-27 calls a month), so search will be what
+    # empties the pool — and when it does, those readers start failing too and
+    # drop out of the chain. Firecrawl says so with a 402 (seen in our own logs);
+    # what status Tavily uses is NOT verified — its docs do not publish one, so
+    # do not grep for a specific code there, and note that _CREDIT_MARKERS may
+    # or may not match its wording. That trade is deliberate: the readers we
+    # lose are worth far less than the search we gain, and the chain has five
+    # other readers. But it is a trade, not a free lunch, and it cannot be
+    # turned off per-product — pulling the key disables the reader as well.
     Instance(
         "tavily-search", "tavily_search", api_key_env="TAVILY_1_API_KEY", proxy_env="TAVILY_1_PROXY"
     ),
@@ -120,11 +131,13 @@ INSTANCES: list[Instance] = [
 # source. Cost scales with how many instances are ENABLED, not with position —
 # so enabling all of them means paying all of them on every single query.
 #
-# Order: proven and free first (searxng self-hosted, brave's 2000/month, then
-# tavily and firecrawl, whose search allowance we already own), then the proven
-# paid workhorse jina-search at ~$0.0005/query, then the vendors we have no key
-# for yet, cheapest first (xmlriver ~$0.0003 on the Yandex index, parallel and
-# octen at $1/1k, linkup and youcom at $5/1k), then serper, then exa at $7/1k.
+# Order: proven and free first (searxng self-hosted, brave's 2000/month), then
+# tavily-search and firecrawl-search — no new secret, but NOT free: they spend
+# the same monthly pool as their own readers, see the instance comment above.
+# Then the proven paid workhorse jina-search at ~$0.0005/query, then the vendors
+# we have no key for yet, cheapest first (xmlriver ~$0.0003 on the Yandex index,
+# parallel and octen at $1/1k, linkup and youcom at $5/1k), then serper, then
+# exa at $7/1k.
 SEARCH_PIPELINE: list[str] = [
     "searxng",
     "brave",

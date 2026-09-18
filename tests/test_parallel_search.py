@@ -19,6 +19,7 @@ from src.providers.base import ProviderError
 from src.providers.parallel_search import (
     PARALLEL_MAX_RESULTS_CAP,
     PARALLEL_SEARCH_ENDPOINT,
+    _SNIPPET_MAX_CHARS,
     ParallelSearch,
 )
 
@@ -242,3 +243,47 @@ async def test_invalid_json_is_a_provider_error(make_config):
 def test_requires_an_api_key(make_config):
     with pytest.raises(ValueError):
         ParallelSearch(make_config("parallel_search"))
+
+
+@respx.mock
+async def test_long_excerpts_are_truncated_to_the_snippet_cap(make_config):
+    # Parallel returns compressed page extracts, not one-line summaries: several
+    # per hit, each potentially long. Untrimmed, one web_search answer could
+    # carry tens of kilobytes — every other provider's snippet is a sentence or
+    # two. The cap matches the one rerank.py already applies to a result's text.
+    payload = {
+        "results": [
+            {
+                "url": "https://parallel.test/long",
+                "title": "Long one",
+                "excerpts": ["x" * 900, "y" * 900],
+            }
+        ]
+    }
+    respx.post(PARALLEL_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+    provider = ParallelSearch(make_config("parallel_search", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        results = await provider.search(client, "q", 5, 1, None)
+    assert len(results[0].snippet) == _SNIPPET_MAX_CHARS
+
+
+@respx.mock
+async def test_a_snippet_exactly_at_the_cap_is_not_touched(make_config):
+    # The boundary: at exactly the cap length the slice must take nothing off —
+    # this is the off-by-one guard (a [:cap - 1], or a ">= cap" branch that
+    # appends an ellipsis, fails here). That the cap exists at all is pinned by
+    # the truncation test above; this one alone would pass without any cap.
+    payload = {
+        "results": [
+            {
+                "url": "https://parallel.test/exact",
+                "title": "Exact",
+                "excerpts": ["z" * _SNIPPET_MAX_CHARS],
+            }
+        ]
+    }
+    respx.post(PARALLEL_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+    provider = ParallelSearch(make_config("parallel_search", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        results = await provider.search(client, "q", 5, 1, None)
+    assert results[0].snippet == "z" * _SNIPPET_MAX_CHARS

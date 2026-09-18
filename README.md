@@ -48,7 +48,11 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   first sufficient answer, and `brightdata` (the anti-bot unlocker) sits last so
   it only ever sees pages everything cheaper already bounced off. A single probe
   GET classifies the url. PDFs (Content-Type /
-  `.pdf` / `%PDF` magic) are extracted with pypdf; for HTML, that same body is
+  `.pdf` / `%PDF` magic) are extracted with pypdf — except a PDF with **no text
+  layer** (a scan), which falls through into the chain so the remote readers get
+  a shot at it with their own parsers, with pypdf's notice kept as the last
+  resort. jina's OCR tier joins that attempt only when the url path ends in
+  `.pdf` *and* jina is keyed; for HTML, that same body is
   handed to `trafilatura` so the hot path never GETs twice, then the remaining
   instances are tried in order and the first to return content
   `>= FALLBACK_MIN_CHARS` wins.
@@ -103,7 +107,9 @@ Provider env vars: `SEARXNG_URL`, `BRAVE_API_KEY`, `SERPER_API_KEY`, `EXA_API_KE
 the search reranker; the reader alone also works keyless), `CRAWL4AI_URL` +
 `CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`, `TAVILY_2_API_KEY`, `FIRECRAWL_API_KEY`.
 The Tavily and Firecrawl keys each enable **two** instances — the reader and the
-search provider — because both vendors sell search and extract off one key.
+search provider — because both vendors sell search and extract off one key, out
+of one shared monthly pool. Search runs on every query and will drain that pool
+well before the readers do; when it runs out, both halves stop working.
 Keyless until registered: `XMLRIVER_USER_ID` + `XMLRIVER_API_KEY` (Yandex SERP),
 `PARALLEL_API_KEY`, `OCTEN_API_KEY`, `LINKUP_API_KEY`, `YOUCOM_API_KEY`, and
 `BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`.

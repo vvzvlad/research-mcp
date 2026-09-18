@@ -258,10 +258,11 @@ async def test_payment_required_is_a_provider_error(make_config):
 
 
 @respx.mock
-async def test_insufficient_balance_403_is_a_plain_client_error(make_config):
+async def test_insufficient_balance_403_is_reported_as_out_of_credits(make_config):
     # Octen answers a depleted account with 403 "Insufficient balance in
-    # account" (not 402). The shared 4xx rule in _http.py already drops the
-    # instance from the merge — this module adds no special case.
+    # account" (not 402). This module adds no special case — the shared rule in
+    # _http.py matches that wording against _CREDIT_MARKERS, so the operator
+    # sees a billing state rather than a generic client error.
     route = respx.post(OCTEN_SEARCH_ENDPOINT).mock(
         return_value=httpx.Response(
             403, json={"code": 403, "msg": "Insufficient balance in account", "request_id": "r"}
@@ -271,7 +272,8 @@ async def test_insufficient_balance_403_is_a_plain_client_error(make_config):
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
             await provider.search(client, "q", 5, 1, None)
-    assert "HTTP 403" in str(excinfo.value)
+    assert "out of credits (HTTP 403)" in str(excinfo.value)
+    assert "client error" not in str(excinfo.value)
     assert route.call_count == 1  # 4xx is never retried
 
 
@@ -290,3 +292,82 @@ async def test_invalid_json_is_a_provider_error(make_config):
 def test_requires_an_api_key(make_config):
     with pytest.raises(ValueError):
         OctenSearch(make_config("octen_search"))
+
+
+@respx.mock
+async def test_error_envelope_inside_http_200_raises(make_config):
+    # s.jina.ai answers application failures with a 200 and a non-success code
+    # in the envelope, and jina_search.py guards against exactly that. Octen has
+    # the same envelope shape, so an error code here must not be recorded as a
+    # successful (and billed) empty answer.
+    route = respx.post(OCTEN_SEARCH_ENDPOINT).mock(
+        return_value=httpx.Response(
+            200, json={"code": 1001, "msg": "internal error", "request_id": "r", "data": None}
+        )
+    )
+    provider = OctenSearch(make_config("octen_search", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.search(client, "q", 5, 1, None)
+    assert "API error" in str(excinfo.value)
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("code", "is_success"),
+    [
+        (0, True),  # documented success value
+        ("0", True),  # a stricter-typing day must not read as a failure
+        (None, True),  # absent code: nothing to object to
+        (1001, False),
+        ("500", False),
+    ],
+)
+async def test_envelope_code_decides_success(make_config, code, is_success):
+    # One test for both directions, so it pins the guard itself and not just the
+    # string/int normalisation: drop the guard and the two error rows fail.
+    payload = {**OCTEN_PAYLOAD}
+    if code is None:
+        payload.pop("code")
+    else:
+        payload["code"] = code
+    respx.post(OCTEN_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+    provider = OctenSearch(make_config("octen_search", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        if is_success:
+            assert await provider.search(client, "q", 5, 1, None)
+        else:
+            with pytest.raises(ProviderError) as excinfo:
+                await provider.search(client, "q", 5, 1, None)
+            assert "API error" in str(excinfo.value)
+
+
+@respx.mock
+async def test_highlight_as_a_list_is_joined_not_crashed(make_config):
+    # "highlight snippets" is plural in the vendor's own wording and we have no
+    # key to settle the shape by observation. A list reaching `.strip()` would
+    # raise AttributeError, which Pipeline._one logs as a crashed provider on
+    # every query — the instance would never return anything at all.
+    payload = {
+        "code": 0,
+        "msg": "success",
+        "request_id": "r",
+        "data": {
+            "query": "q",
+            "results": [
+                {
+                    "title": "Listed highlights",
+                    "url": "https://octen.test/1",
+                    "highlight": ["first fragment", "  second fragment  ", "", 7],
+                }
+            ],
+        },
+    }
+    respx.post(OCTEN_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+    provider = OctenSearch(make_config("octen_search", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        out = await provider.search(client, "q", 5, 1, None)
+    assert len(out) == 1
+    # Non-strings dropped, blanks dropped, the rest joined and trimmed.
+    assert out[0].snippet == "first fragment second fragment"
