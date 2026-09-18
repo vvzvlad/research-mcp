@@ -1,9 +1,10 @@
 # research-mcp
 
 A stateless **MCP facade** that hides a pyramid of search/read providers behind a
-single streamable-http MCP endpoint and exposes just **3 clean tools** with good
-Russian help texts. An LLM gets a simple "search → read" toolset; behind it,
-several providers are tried, merged, and failed over automatically.
+single streamable-http MCP endpoint and exposes just **4 clean tools** with good
+Russian help texts. An LLM gets a simple "search → read" toolset (or both at
+once); behind it, several providers are tried, merged, and failed over
+automatically.
 
 The app does **no authentication** — it is published through Traefik + basicAuth
 on the host. It holds no application state: the only thing persisted is a log
@@ -16,6 +17,16 @@ file under `data/` (kept on a volume).
 | `web_search(query, num_results=8, page=1, language=None)` | Search across all enabled providers, merge + dedup → ranked list (title, URL, snippet). Search only. |
 | `read_page(url)` | One page or PDF → clean Markdown. Auto-detects type, walks the read pipeline (light → heavy) until one succeeds. |
 | `read_pages(urls)` | Up to 20 urls concurrently → `{summary, pages}`, where each page is `{url, ok, markdown}` or `{url, ok, error, reason}`. |
+| `search_and_read(query, num_results=5, page=1, language=None)` | Search **and** read the top hits in one call → `{summary, results}`, each result a hit (`title`, `url`, `snippet`) plus its `markdown` (or `error` + `reason`). Over-fetches candidates and reads them in waves, so failed urls do not eat the quota. |
+
+The tool descriptions cross-reference each other (when to take this one, when to
+take another), so the model gets a routing graph instead of four independent
+texts. `search_and_read` is the default for research; `web_search` is for links
+only; `read_pages` / `read_page` are for urls that are already known.
+
+The batch tools (`read_pages`, `search_and_read`) cap each page at
+`READ_BATCH_MAX_CHARS` and mark the cut with `[содержимое обрезано на N
+символах]`; `read_page` always returns the page in full.
 
 ## Architecture: types + instances
 
@@ -81,7 +92,10 @@ All config comes from ENV / `.env` (see `.env.example`). Provider secrets/URLs
 are read by **name** in the instance loader, not declared as Settings fields. The
 non-secret knobs (all defaulted): `MCP_HOST`, `MCP_PORT`, `LOG_LEVEL`,
 `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `REQUEST_TIMEOUT`,
-`FALLBACK_MIN_CHARS`, `READ_PAGES_CONCURRENCY`, `RETRIES`,
+`FALLBACK_MIN_CHARS`, `READ_PAGES_CONCURRENCY`, `READ_BATCH_MAX_CHARS` (per-page
+content budget of the batch tools — `read_pages` and `search_and_read`; beyond it
+the markdown is cut and marked, `read_page` is never truncated, `0` disables the
+cut), `RETRIES`,
 `SEARCH_RERANK_ENABLED`, `JINA_TOKEN_BUDGET`, `ALLOW_PRIVATE_NETWORK` (escape
 hatch for the SSRF guard: `true` lets `read_page` fetch private/loopback
 addresses, which are blocked by default). The `read_pages`
@@ -138,9 +152,9 @@ the log file across updates) — we never build on prod.
 | `src/providers/<type>.py` | One module per provider type. |
 | `src/providers/pdf.py` | PDF detection + pypdf text extraction (used by the pipeline). |
 | `src/pipeline_config.py` | In-code instances + pipeline order. |
-| `src/pipeline.py` | Instance loader + search/read logic. |
+| `src/pipeline.py` | Instance loader + search/read logic (and `search_and_read`, their composition). |
 | `src/rerank.py` | `JinaReranker` — post-merge rerank of search results. |
 | `src/settings.py` | Non-secret knobs (pydantic-settings). |
-| `src/server.py` | `build_server()` with the 3 `@mcp.tool` definitions. |
+| `src/server.py` | `build_server()` with the 4 `@mcp.tool` definitions. |
 | `main.py` | Thin entry point: build server, run streamable-http. |
 | `tests/` | pytest suite (network mocked with respx). |

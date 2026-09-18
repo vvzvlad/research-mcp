@@ -1033,6 +1033,147 @@ async def test_proxied_provider_still_serves(monkeypatch, settings):
         await pipe.aclose()
 
 
+# -- search_and_read: over-fetch + read waves ------------------------------
+
+
+def _mock_search_hits(count: int) -> list[str]:
+    """Make searxng answer with ``count`` hits; return their urls in order."""
+    urls = [f"https://hit.test/{i}" for i in range(count)]
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"url": url, "title": f"t{i}", "content": f"s{i}"}
+                    for i, url in enumerate(urls)
+                ]
+            },
+        )
+    )
+    return urls
+
+
+def _mock_readable(url: str):
+    """That url opens: the probe GET hands trafilatura an extractable article."""
+    return respx.get(url).mock(return_value=httpx.Response(200, text=ARTICLE_HTML))
+
+
+def _mock_dead(url: str):
+    """That url opens nowhere: the probe AND the keyless jina reader both fail."""
+    route = respx.get(url).mock(side_effect=httpx.ConnectError("nope"))
+    respx.get(f"https://r.jina.ai/{url}").mock(side_effect=httpx.ConnectError("nope"))
+    return route
+
+
+@respx.mock
+async def test_search_and_read_tops_up_after_failed_reads(monkeypatch, settings):
+    # Two of the first three candidates do not open, so the next wave reads
+    # exactly two more: the answer still carries the requested 3 pages.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    urls = _mock_search_hits(8)
+    for index, url in enumerate(urls):
+        (_mock_dead if index in (0, 2) else _mock_readable)(url)
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search_and_read(
+            "q", num_results=3, page=1, language=None, candidates=8
+        )
+    finally:
+        await pipe.aclose()
+
+    assert [item.url for item in outcome.items] == [urls[1], urls[3], urls[4]]
+    assert all(item.ok for item in outcome.items)
+    # Wave 1 read candidates 0-2 (two of them failed), wave 2 read 3-4.
+    assert outcome.read_attempts == 5
+    assert outcome.candidates == 8
+    # Each entry is the search hit AND its content, which is the whole point.
+    first = outcome.items[0]
+    assert (first.title, first.snippet) == ("t1", "s1")
+    assert "main article body" in (first.markdown or "")
+    assert first.error is None and first.reason is None
+    # The underlying search travels with the entries.
+    assert outcome.search.answered == ["searxng"]
+
+
+@respx.mock
+async def test_search_and_read_fills_the_remainder_with_failures(monkeypatch, settings):
+    # The candidates run out before 3 pages open: the failed urls fill what is
+    # left of the quota, and the list never grows past num_results.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    urls = _mock_search_hits(4)
+    _mock_readable(urls[0])
+    for url in urls[1:]:
+        _mock_dead(url)
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search_and_read(
+            "q", num_results=3, page=1, language=None, candidates=4
+        )
+    finally:
+        await pipe.aclose()
+
+    assert len(outcome.items) == 3  # never longer than num_results
+    assert outcome.read_attempts == 4  # every candidate was tried
+    assert [item.ok for item in outcome.items] == [True, False, False]
+    # Successes first in search order, then the failures — and the 4th
+    # candidate's failure is dropped: it does not fit in the quota.
+    assert [item.url for item in outcome.items] == [urls[0], urls[1], urls[2]]
+    failed = outcome.items[1]
+    assert failed.markdown is None
+    assert failed.reason == "network"  # the category, ready to be labelled
+    assert "Не удалось прочитать страницу" in (failed.error or "")
+
+
+@respx.mock
+async def test_search_and_read_reads_no_more_urls_than_needed(monkeypatch, settings):
+    # A read costs money: with 10 candidates and 2 pages requested, exactly the
+    # first two candidates may be fetched.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    urls = _mock_search_hits(10)
+    routes = [_mock_readable(url) for url in urls]
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search_and_read(
+            "q", num_results=2, page=1, language=None, candidates=10
+        )
+    finally:
+        await pipe.aclose()
+
+    assert outcome.read_attempts == 2
+    assert outcome.candidates == 10  # the over-fetch still happened...
+    assert [route.call_count for route in routes[:2]] == [1, 1]
+    assert all(route.call_count == 0 for route in routes[2:])  # ...but cost nothing
+
+
+@respx.mock
+async def test_search_and_read_emits_a_summary_log(monkeypatch, settings, capture_logs):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    urls = _mock_search_hits(4)
+    _mock_dead(urls[0])
+    for url in urls[1:]:
+        _mock_readable(url)
+
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.search_and_read("q", num_results=2, page=1, language=None, candidates=4)
+    finally:
+        await pipe.aclose()
+
+    line = next((m for m in capture_logs if m.startswith("search_and_read query=")), None)
+    assert line is not None
+    assert "candidates=4" in line
+    assert "attempts=3" in line  # wave 1 read two urls, one failed → one more
+    assert "read=2" in line
+    assert "results=2" in line
+
+
 # -- trafilatura extraction contract (fix C) ------------------------------
 
 

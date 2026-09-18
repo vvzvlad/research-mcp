@@ -142,6 +142,20 @@ def format_read_failure_status(reason: str, tried: int) -> str:
     return f"Статус чтения: не прочитано ({reason_label(reason)}); провайдеров испробовано: {tried}"
 
 
+def truncate_markdown(markdown: str, max_chars: int) -> str:
+    """Cut ``markdown`` to ``max_chars`` and mark how much was dropped.
+
+    The marker sits on its own line so it cannot be read as page text, and it
+    carries the NUMBER of dropped characters — "there is more, this much more"
+    is what lets the model decide whether to go after the rest. ``max_chars <= 0``
+    disables the cut; content that fits is returned untouched (no marker).
+    """
+    if max_chars <= 0 or len(markdown) <= max_chars:
+        return markdown
+    dropped = len(markdown) - max_chars
+    return f"{markdown[:max_chars]}\n\n[содержимое обрезано на {dropped} символах]"
+
+
 def format_batch_status(read_ok: int, failed: int, reasons: Sequence[str]) -> str:
     """One line of read_pages telemetry: how much of the batch actually opened.
 
@@ -150,3 +164,24 @@ def format_batch_status(read_ok: int, failed: int, reasons: Sequence[str]) -> st
     """
     total = read_ok + failed
     return f"Статус чтения: прочитано {read_ok} из {total}; {_failed_part(failed, reasons)}"
+
+
+def format_search_read_status(
+    read_ok: int, attempted: int, candidates: int, reasons: Sequence[str]
+) -> str:
+    """One line of search_and_read telemetry: what the reads cost and yielded.
+
+    ``format_batch_status`` cannot serve here: that tool is handed a fixed list
+    of urls, while this one PICKS its urls — it over-fetches ``candidates`` hits
+    and spends reads on them in waves until enough pages opened. So the line
+    counts the reads actually attempted, not the size of the answer.
+
+    ``reasons`` holds the categories of the failed reads that are IN the returned
+    list; a failure that a later wave topped up is counted but has no entry left
+    to explain, so the categories can cover only part of the failures.
+    """
+    failed = max(0, attempted - read_ok)
+    return (
+        f"Статус чтения: прочитано {read_ok} из {attempted} "
+        f"(кандидатов: {candidates}); {_failed_part(failed, reasons)}"
+    )

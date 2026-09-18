@@ -21,6 +21,10 @@ thin/empty/error → next instance. It returns a ``ReadOutcome``: the markdown
 plus the winning provider, the chain that was walked and every failure along the
 way tagged with a ``src.failure_reason`` category. If all fail, it raises
 ``ReadFailed`` (a ``ProviderError``) carrying the same telemetry.
+
+``search_and_read`` composes the two: it runs an over-fetched search and reads
+the top hits in waves (each wave only as wide as the previous one's failures)
+until ``num_results`` pages have opened, returning a ``SearchReadOutcome``.
 """
 
 from __future__ import annotations
@@ -104,6 +108,41 @@ class ReadOutcome:
     elapsed_ms: int
 
 
+@dataclass(slots=True)
+class ReadItem:
+    """One entry of a ``SearchReadOutcome``: a search hit plus what reading it gave.
+
+    The search fields always carry the hit as the search returned it; the read
+    fields are mutually exclusive — ``ok`` means ``markdown``, otherwise
+    ``error`` (the message) and ``reason`` (a ``src.failure_reason`` constant,
+    for the caller to label).
+    """
+
+    title: str
+    url: str
+    snippet: str
+    ok: bool
+    markdown: str | None = None
+    error: str | None = None
+    reason: str | None = None
+
+
+@dataclass(slots=True)
+class SearchReadOutcome:
+    """One search_and_read request: the entries plus what they cost.
+
+    ``search`` is the underlying search (over-fetched, so its result count is
+    larger than ``items``), ``candidates`` is how many hits it brought back and
+    ``read_attempts`` how many of them a read was actually spent on — the two
+    numbers that say how much of the over-fetch the failures ate.
+    """
+
+    items: list[ReadItem]  # ok first in search order, then failed; <= num_results
+    search: SearchOutcome
+    candidates: int
+    read_attempts: int
+
+
 class ReadFailed(ProviderError):
     """Every read method failed. Carries the telemetry of the failed attempt.
 
@@ -116,6 +155,18 @@ class ReadFailed(ProviderError):
         super().__init__(message)
         self.tried = tried
         self.failures = failures
+
+
+def classify_read_failure(exc: BaseException) -> str:
+    """The one failure category to report for a url that did not open.
+
+    A ``ReadFailed`` already carries a classified reason per provider, so the
+    dominant one speaks for the whole chain; anything else (the SSRF guard, an
+    unexpected crash) is classified on the spot.
+    """
+    if isinstance(exc, ReadFailed):
+        return failure_reason.dominant_reason(exc.failures)
+    return failure_reason.classify(exc)
 
 
 def _is_tls_verify_error(exc: Exception) -> bool:
@@ -784,3 +835,100 @@ class Pipeline:
                 return response
         except httpx.HTTPError:
             return None
+
+    # -- search + read (combined) -------------------------------------------
+
+    async def search_and_read(
+        self,
+        query: str,
+        num_results: int,
+        page: int,
+        language: str | None,
+        candidates: int,
+    ) -> SearchReadOutcome:
+        """Search, then read the top hits, and return both in one outcome.
+
+        Pure composition of ``search`` and ``read``: every provider decision,
+        failover and per-request log line stays where it already lives.
+
+        ``candidates`` is the OVER-FETCHED search count, computed by the caller
+        (the tool owns the cap on how many results a search may ask for): some
+        urls never open, so the search is asked for more hits than the
+        ``num_results`` pages we owe. Those extra candidates are NOT all read up
+        front — a read costs money — but in WAVES: the first ``num_results``
+        candidates are read concurrently under ``read_pages_concurrency``, and
+        each following wave reads exactly as many untouched candidates as the
+        previous wave failed to open, until enough pages are in hand or the
+        candidates run out.
+        """
+        num_results = max(1, num_results)
+        # A caller that asked for fewer candidates than pages would cap the
+        # answer below what it requested; the over-fetch is never negative.
+        candidates = max(num_results, candidates)
+        outcome = await self.search(query, candidates, page, language)
+        hits = outcome.results
+
+        semaphore = asyncio.Semaphore(self._settings.read_pages_concurrency)
+
+        async def _one(hit: SearchResult) -> ReadItem:
+            # Never raises: a url that did not open becomes a failed entry, so a
+            # single dead link cannot take the whole wave down.
+            async with semaphore:
+                try:
+                    read = await self.read(hit.url)
+                except ProviderError as exc:
+                    error, reason = str(exc), classify_read_failure(exc)
+                except Exception as exc:  # noqa: BLE001 — never break the wave
+                    error = f"Непредвиденная ошибка: {exc}"
+                    reason = classify_read_failure(exc)
+                else:
+                    return ReadItem(
+                        title=hit.title,
+                        url=hit.url,
+                        snippet=hit.snippet,
+                        ok=True,
+                        markdown=read.markdown,
+                    )
+            return ReadItem(
+                title=hit.title,
+                url=hit.url,
+                snippet=hit.snippet,
+                ok=False,
+                error=error,
+                reason=reason,
+            )
+
+        opened: list[ReadItem] = []
+        failed: list[ReadItem] = []
+        next_hit = 0
+        attempts = 0
+        while len(opened) < num_results and next_hit < len(hits):
+            # Take exactly what is still missing: num_results on the first pass,
+            # then one candidate per url the previous wave failed to open.
+            wave = hits[next_hit : next_hit + (num_results - len(opened))]
+            next_hit += len(wave)
+            attempts += len(wave)
+            for item in await asyncio.gather(*(_one(hit) for hit in wave)):
+                (opened if item.ok else failed).append(item)
+
+        # Pages that opened come first, in search order; the failed ones fill
+        # whatever is left of the quota, so the list never exceeds num_results.
+        items = opened[:num_results]
+        items.extend(failed[: num_results - len(items)])
+
+        # Per-url lines are emitted by read() and the query line by search();
+        # this one ties them together with what the over-fetch actually cost.
+        logger.info(
+            "search_and_read query={!r} candidates={} attempts={} read={} results={}",
+            query,
+            len(hits),
+            attempts,
+            len(opened),
+            len(items),
+        )
+        return SearchReadOutcome(
+            items=items,
+            search=outcome,
+            candidates=len(hits),
+            read_attempts=attempts,
+        )

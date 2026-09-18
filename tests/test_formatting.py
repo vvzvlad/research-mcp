@@ -4,8 +4,10 @@ from src.formatting import (
     format_batch_status,
     format_read_failure_status,
     format_read_status,
+    format_search_read_status,
     format_search_results,
     format_search_status,
+    truncate_markdown,
 )
 from src.pipeline import ReadOutcome, SearchOutcome
 from src.providers.base import SearchResult
@@ -159,3 +161,36 @@ def test_batch_status_line_deduplicates_categories():
 
 def test_batch_status_line_without_failures_lists_no_categories():
     assert format_batch_status(2, 0, []) == "Статус чтения: прочитано 2 из 2; ошибок: 0"
+
+
+def test_search_read_status_line_format():
+    # 3 pages out of 7 reads spent on 12 over-fetched candidates.
+    line = format_search_read_status(3, 7, 12, ["timeout", "dns"])
+    assert line == (
+        "Статус чтения: прочитано 3 из 7 (кандидатов: 12); ошибок: 4 (таймаут, DNS)"
+    )
+
+
+def test_search_read_status_line_counts_failures_it_cannot_name():
+    # Every failed read was topped up by a later wave, so no entry is left to
+    # explain them — the count must still be honest.
+    line = format_search_read_status(2, 5, 6, [])
+    assert line == "Статус чтения: прочитано 2 из 5 (кандидатов: 6); ошибок: 3"
+
+
+# -- the per-page content budget -------------------------------------------
+
+
+def test_truncate_marks_the_number_of_dropped_characters():
+    out = truncate_markdown("x" * 100, 40)
+    assert out == "x" * 40 + "\n\n[содержимое обрезано на 60 символах]"
+
+
+def test_truncate_leaves_content_that_fits_untouched():
+    assert truncate_markdown("short page", 40) == "short page"
+    # Exactly at the budget is still "fits" — nothing was dropped.
+    assert truncate_markdown("x" * 40, 40) == "x" * 40
+
+
+def test_truncate_disabled_by_a_non_positive_budget():
+    assert truncate_markdown("x" * 100, 0) == "x" * 100
