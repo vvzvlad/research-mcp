@@ -48,7 +48,7 @@ from src.providers.base import (
     SearchProvider,
     SearchResult,
 )
-from src.providers.pdf import extract_pdf_text, looks_like_pdf
+from src.providers.pdf import NO_TEXT_LAYER_NOTICE, extract_pdf_text, looks_like_pdf
 from src.providers.registry import REGISTRY
 from src.providers.trafilatura import TrafilaturaRead, extract_markdown
 from src.rerank import JinaReranker
@@ -508,9 +508,18 @@ class Pipeline:
         # The probe never hard-fails: a fetch error or an unparseable "PDF"
         # defers to the read chain below (jina/tavily/firecrawl fetch server-side).
         pdf_text, probe_html = await self._probe(self._clients.guarded_client_for(None), url)
+        # A PDF with a text layer is done here. A PDF WITHOUT one is a scan:
+        # pypdf has nothing to give and used to return the notice as a success,
+        # which meant a scan never reached the read chain — and so never reached
+        # jina's OCR tier, which exists for exactly this case. Fall through
+        # instead, keeping the notice as the last resort if the chain also comes
+        # back empty (the behaviour callers had before).
+        pdf_notice: str | None = None
         if pdf_text is not None:
-            _log_ok("pdf")
-            return pdf_text
+            if pdf_text != NO_TEXT_LAYER_NOTICE:
+                _log_ok("pdf")
+                return pdf_text
+            pdf_notice = pdf_text
 
         # 2) HTML path: walk the read pipeline until one yields enough content.
         errors: list[str] = []
@@ -527,10 +536,12 @@ class Pipeline:
                 errors.append(f"{provider.name}: {exc}")
                 continue
             # Returned without raising → a billed 200 (even if too thin). One
-            # jina success may hide an extra billed upstream call (the
-            # readerlm-v2 escalation, 3x-priced) not reflected here — the
-            # provider emits its "readerlm-v2 escalation" log line only after
-            # that call returned, so those lines count the extra billed calls.
+            # jina success may hide up to three extra billed upstream calls
+            # (readerlm-v2 at 3x, +x-proxy at 5x, jina-ocr-v1 at 40x) not
+            # reflected here — the provider emits one "... escalation for url="
+            # line per step, only after that step returned, so grepping that
+            # suffix counts the extra billed calls. See _ESCALATIONS in
+            # src/providers/jina.py for the current list of labels.
             billed.append(provider.name)
             if len(content) >= self._settings.fallback_min_chars:
                 _log_ok(provider.name)
@@ -544,6 +555,11 @@ class Pipeline:
         if best_thin:
             _log_ok(best_thin_name or "", suffix=" (thin fallback)")
             return best_thin
+        if pdf_notice:
+            # Scanned PDF and nothing in the chain could read it either: hand
+            # back the same notice this branch returned before OCR existed.
+            _log_ok("pdf", suffix=" (no text layer)")
+            return pdf_notice
         paid_calls, pct = self._account(billed)
         logger.warning(
             "read url={} -> FAILED ok=false tried={} paid_calls={} cum_paid={} "

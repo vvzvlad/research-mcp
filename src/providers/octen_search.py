@@ -27,9 +27,10 @@ snippets. Returned only if highlight.enable is true" — not ``description``
 empty ``results`` list is a normal empty answer.
 
 Documented errors: 400 "Missing parameter query", 401 "Invalid API Key", 403
-"Insufficient balance in account" (what a depleted account returns — here it
-just falls into the generic 4xx → ``ProviderError`` rule in ``_http.py``, which
-drops this instance from the merge; no special handling belongs in this module),
+"Insufficient balance in account" (what a depleted account returns — no special
+handling belongs in this module, but note that ``_http.py`` matches that wording
+against ``_CREDIT_MARKERS`` and reports it as "out of credits (HTTP 403)", so an
+empty balance here reads as a billing state and not as a broken request),
 429 "Exceeding the rate limit", 500 "Internal error".
 """
 
@@ -72,6 +73,25 @@ def _octen_lang(value: str) -> str | None:
     """
     code = value.strip().replace("_", "-").lower().split("-")[0]
     return code if code in _OCTEN_LANGS else None
+
+
+def _highlight_text(value: object) -> str:
+    """Flatten Octen's ``highlight`` field into one snippet string.
+
+    The docs call these "highlight snippets" (plural) and the request side has a
+    ``highlight.max_tokens`` knob, so a LIST of fragments is as plausible as a
+    single string — and the neighbouring vendors settle it both ways: Parallel
+    returns a list in ``excerpts``, You.com a list in ``snippets`` beside a
+    string ``description``. We have no Octen key to settle it by observation, so
+    accept both shapes: calling ``.strip()`` on a list would raise
+    AttributeError, which ``Pipeline._one`` would log as a crashed provider on
+    EVERY query — the instance would simply never return anything.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return " ".join(part.strip() for part in value if isinstance(part, str) and part.strip())
+    return ""
 
 
 @register("octen_search")
@@ -131,6 +151,14 @@ class OctenSearch:
             data = response.json()
         except ValueError as exc:
             raise ProviderError(f"{self.name}: invalid JSON response") from exc
+        # Application-level failure inside a 200, the way s.jina.ai does it —
+        # see the identical guard in jina_search.py. Without this an error
+        # envelope would be recorded as a successful (and billed) empty answer.
+        # Compared as a string: the documented success value is the number 0,
+        # but "0" from a stricter-typing day must not read as an error.
+        code = data.get("code")
+        if code is not None and str(code).strip() != "0":
+            raise ProviderError(f"{self.name}: API error (code {code!r})")
         # Results live one level down, under `data` (the envelope also carries
         # `code`/`msg`/`request_id`/`meta`).
         payload = data.get("data")
@@ -149,7 +177,7 @@ class OctenSearch:
                     title=(item.get("title") or "").strip(),
                     url=url,
                     # Octen calls the snippet "highlight".
-                    snippet=(item.get("highlight") or "").strip(),
+                    snippet=_highlight_text(item.get("highlight")),
                     source=self.name,
                 )
             )

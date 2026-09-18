@@ -59,8 +59,11 @@ https://xmlriver.com/apidoc/api-about/ for Google):
 
 Engine choice: Yandex is the default on purpose. This provider exists for
 Russian-language results, which is the only reason to pay for a Russian SERP
-proxy; Google is already covered by serper. Set ``options["engine"] =
-"google"`` on the instance to point the same provider at ``/search/xml``.
+proxy; Google is already covered by serper. The class reads the engine from
+``config.options["engine"]``, but nothing populates that today: ``Instance`` has
+no options field and ``Pipeline.build`` fills ``options`` only for the jina
+reader. So Google is reachable from tests only — switching production to it
+needs those two plumbing changes first, not just a config line.
 """
 
 from __future__ import annotations

@@ -55,6 +55,16 @@ PARALLEL_MAX_RESULTS_CAP = 50
 # line between them so the merged snippet stays readable as markdown.
 _EXCERPT_SEPARATOR = "\n\n"
 
+# Parallel returns compressed page extracts, not one-line summaries: several
+# excerpts per hit, each potentially long. Unlike every other provider here,
+# whose snippet is a sentence or two, an untrimmed hit could put tens of
+# kilobytes into a single web_search answer. 1000 chars is the threshold the
+# project already applies to a search result's text — see the document builder
+# in src/rerank.py, which truncates at exactly this before sending to the
+# reranker — so the snippet the model reads and the text the reranker scores
+# stay the same length.
+_SNIPPET_MAX_CHARS = 1000
+
 
 @register("parallel_search")
 class ParallelSearch:
@@ -141,7 +151,7 @@ class ParallelSearch:
                 SearchResult(
                     title=(item.get("title") or "").strip(),
                     url=url,
-                    snippet=_EXCERPT_SEPARATOR.join(parts),
+                    snippet=_EXCERPT_SEPARATOR.join(parts)[:_SNIPPET_MAX_CHARS],
                     source=self.name,
                 )
             )

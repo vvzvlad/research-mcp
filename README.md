@@ -103,7 +103,9 @@ Provider env vars: `SEARXNG_URL`, `BRAVE_API_KEY`, `SERPER_API_KEY`, `EXA_API_KE
 the search reranker; the reader alone also works keyless), `CRAWL4AI_URL` +
 `CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`, `TAVILY_2_API_KEY`, `FIRECRAWL_API_KEY`.
 The Tavily and Firecrawl keys each enable **two** instances — the reader and the
-search provider — because both vendors sell search and extract off one key.
+search provider — because both vendors sell search and extract off one key, out
+of one shared monthly pool. Search runs on every query and will drain that pool
+well before the readers do; when it runs out, both halves answer 402.
 Keyless until registered: `XMLRIVER_USER_ID` + `XMLRIVER_API_KEY` (Yandex SERP),
 `PARALLEL_API_KEY`, `OCTEN_API_KEY`, `LINKUP_API_KEY`, `YOUCOM_API_KEY`, and
 `BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`.

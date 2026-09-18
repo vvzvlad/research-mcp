@@ -258,10 +258,11 @@ async def test_payment_required_is_a_provider_error(make_config):
 
 
 @respx.mock
-async def test_insufficient_balance_403_is_a_plain_client_error(make_config):
+async def test_insufficient_balance_403_is_reported_as_out_of_credits(make_config):
     # Octen answers a depleted account with 403 "Insufficient balance in
-    # account" (not 402). The shared 4xx rule in _http.py already drops the
-    # instance from the merge — this module adds no special case.
+    # account" (not 402). This module adds no special case — the shared rule in
+    # _http.py matches that wording against _CREDIT_MARKERS, so the operator
+    # sees a billing state rather than a generic client error.
     route = respx.post(OCTEN_SEARCH_ENDPOINT).mock(
         return_value=httpx.Response(
             403, json={"code": 403, "msg": "Insufficient balance in account", "request_id": "r"}
@@ -271,7 +272,8 @@ async def test_insufficient_balance_403_is_a_plain_client_error(make_config):
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
             await provider.search(client, "q", 5, 1, None)
-    assert "HTTP 403" in str(excinfo.value)
+    assert "out of credits (HTTP 403)" in str(excinfo.value)
+    assert "client error" not in str(excinfo.value)
     assert route.call_count == 1  # 4xx is never retried
 
 
@@ -290,3 +292,64 @@ async def test_invalid_json_is_a_provider_error(make_config):
 def test_requires_an_api_key(make_config):
     with pytest.raises(ValueError):
         OctenSearch(make_config("octen_search"))
+
+
+@respx.mock
+async def test_error_envelope_inside_http_200_raises(make_config):
+    # s.jina.ai answers application failures with a 200 and a non-success code
+    # in the envelope, and jina_search.py guards against exactly that. Octen has
+    # the same envelope shape, so an error code here must not be recorded as a
+    # successful (and billed) empty answer.
+    route = respx.post(OCTEN_SEARCH_ENDPOINT).mock(
+        return_value=httpx.Response(
+            200, json={"code": 1001, "msg": "internal error", "request_id": "r", "data": None}
+        )
+    )
+    provider = OctenSearch(make_config("octen_search", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.search(client, "q", 5, 1, None)
+    assert "API error" in str(excinfo.value)
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_string_zero_envelope_code_is_success(make_config):
+    # The documented success value is the number 0; a stricter-typing day that
+    # sends "0" must not read as a failure.
+    payload = {**OCTEN_PAYLOAD, "code": "0"}
+    respx.post(OCTEN_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+    provider = OctenSearch(make_config("octen_search", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        out = await provider.search(client, "q", 5, 1, None)
+    assert out
+
+
+@respx.mock
+async def test_highlight_as_a_list_is_joined_not_crashed(make_config):
+    # "highlight snippets" is plural in the vendor's own wording and we have no
+    # key to settle the shape by observation. A list reaching `.strip()` would
+    # raise AttributeError, which Pipeline._one logs as a crashed provider on
+    # every query — the instance would never return anything at all.
+    payload = {
+        "code": 0,
+        "msg": "success",
+        "request_id": "r",
+        "data": {
+            "query": "q",
+            "results": [
+                {
+                    "title": "Listed highlights",
+                    "url": "https://octen.test/1",
+                    "highlight": ["first fragment", "  second fragment  ", "", 7],
+                }
+            ],
+        },
+    }
+    respx.post(OCTEN_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+    provider = OctenSearch(make_config("octen_search", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        out = await provider.search(client, "q", 5, 1, None)
+    assert len(out) == 1
+    # Non-strings dropped, blanks dropped, the rest joined and trimmed.
+    assert out[0].snippet == "first fragment second fragment"

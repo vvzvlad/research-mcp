@@ -56,11 +56,19 @@ INSTANCES: list[Instance] = [
     # REQUIRED here — no optional_api_key — and the instance simply
     # auto-disables when JINA_API_KEY is unset.
     Instance("jina-search", "jina_search", api_key_env="JINA_API_KEY", proxy_env="JINA_PROXY"),
-    # Tavily and Firecrawl sell search and extract off ONE key: the read
-    # instances below already carry these vars, and the search half of both free
-    # monthly allowances (1000 and ~500 calls) was going unused. So these two
-    # instances cost nothing new and need no extra secret — they light up the
-    # moment the reader key is present.
+    # Tavily and Firecrawl sell search and extract off ONE key, so these two
+    # need no new secret and light up the moment the reader key is present.
+    #
+    # They are NOT free, though: the key has ONE monthly pool, shared by both
+    # products. Measured on our own Tavily key 2026-09-18: plan_usage 12 =
+    # search 4 + extract 8, against plan_limit 1000. Search runs on every
+    # web_search while the tavily/firecrawl READERS sit 4th and 6th in the read
+    # chain and win ~1% of reads (19-27 calls a month), so search will be what
+    # empties the pool — and when it does, those readers start answering 402
+    # and drop out of the chain too. That trade is deliberate: the readers we
+    # lose are worth far less than the search we gain, and the chain has five
+    # other readers. But it is a trade, not a free lunch, and it cannot be
+    # turned off per-product — pulling the key disables the reader as well.
     Instance(
         "tavily-search", "tavily_search", api_key_env="TAVILY_1_API_KEY", proxy_env="TAVILY_1_PROXY"
     ),
