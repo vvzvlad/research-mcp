@@ -9,6 +9,30 @@ The app does **no authentication** — it is published through Traefik + basicAu
 on the host. It holds no application state: the only thing persisted is a log
 file under `data/` (kept on a volume).
 
+## Works with zero keys
+
+`make run` on an empty `.env` is enough — **no key, no SearXNG, nothing to deploy
+first.** Two instances need no configuration at all and are therefore always
+enabled: **`duckduckgo`** (search — the no-JS `html.duckduckgo.com` SERP, one
+request per query, no token handshake) and **`trafilatura`** (read — local
+HTML→Markdown extraction). Together they are the floor: search and read both
+work out of the box.
+
+Everything else is an upgrade on top of that floor. A self-hosted **SearXNG**
+(`SEARXNG_URL`) is *optional*; when it is configured it sits **ahead** of
+DuckDuckGo in the pipeline, so SearXNG keeps its copy of every url both of them
+return and DuckDuckGo only adds what nobody ahead of it had. (With the reranker
+on — the default once `JINA_API_KEY` is set — the merged list is reordered by
+relevance across all sources before the trim, so the final ordering can still
+change.) Every paid vendor lights up the moment its key appears.
+
+The floor is deliberately modest: DuckDuckGo is a scraped SERP, not an API, so it
+paces itself to one query per 45s (skipping, never waiting, when the slot is
+taken) and reports a block or a captcha as a failure rather than as an empty
+result set. That pace is the one measured for this upstream: DuckDuckGo blocks
+by IP for 7-8 minutes after a burst, and a block taken here would also silence
+a SearXNG that reaches DuckDuckGo over the same address.
+
 ## Tools
 
 | Tool | What it does |
@@ -30,8 +54,9 @@ Providers are **plugins**. We separate:
 Which instances exist and the order each pipeline tries them is configured **in
 code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
 
-- **Search pipeline** (`searxng → brave → tavily-search → firecrawl-search →
-  jina-search → xmlriver → parallel → octen → linkup → youcom → serper → exa`):
+- **Search pipeline** (`searxng → duckduckgo → brave → tavily-search →
+  firecrawl-search → jina-search → xmlriver → parallel → octen → linkup → youcom
+  → serper → exa`):
   enabled instances run concurrently; results are merged and deduplicated by
   normalized URL (earlier pipeline position wins). Position is therefore a
   **dedup preference, not a cost gate** — every enabled instance is called on
@@ -40,9 +65,14 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   reranked by `jina-reranker-v3.5` so the trim to `num_results` keeps the most
   relevant hits instead of a blind pipeline-order prefix; any rerank failure
   falls back to the merge order.
-  `searxng` and `brave` additionally throttle themselves locally (one query per
-  45s and per 1.1s respectively, matching a measured upstream limit); when the
-  slot is taken they **skip** the current search instead of waiting for it.
+  `searxng`, `duckduckgo` and `brave` additionally throttle themselves locally
+  (one query per 45s, 45s and 1.1s respectively, each matching a measured
+  upstream limit — DuckDuckGo shares SearXNG's, since both reach the same engine
+  from the same address); when the slot is taken they **skip** the current
+  search instead of waiting for it. `duckduckgo` is the only search instance
+  that needs no configuration, which is why it sits directly behind
+  `searxng`: it is on everywhere, but a deployment that runs SearXNG must
+  keep SearXNG's copy of every shared url.
 - **Read pipeline** (`trafilatura → jina → crawl4ai → tavily-1 → tavily-2 →
   firecrawl → brightdata`): here the order IS a cost gate — it stops at the
   first sufficient answer, and `brightdata` (the anti-bot unlocker) sits last so
@@ -62,9 +92,10 @@ the body and logged as `out of credits` too, so an unpaid account never reads as
 a broken API.
 
 An instance is **enabled** only if its required env var(s) are set; otherwise it
-is skipped with a log line. `trafilatura` needs no config (always on); `jina`
-works keyless (its key is optional). At startup the server requires at least one
-search and one read instance, else it exits with a clear message.
+is skipped with a log line. `duckduckgo` and `trafilatura` need no config (always
+on); `jina` works keyless (its key is optional). At startup the server requires at
+least one search and one read instance — a condition those two always satisfy, so
+the check now only catches a broken `pipeline_config.py`.
 
 ## Adding a provider
 
@@ -98,7 +129,9 @@ addresses, which are blocked by default). The `read_pages`
 per-call url cap is a fixed `20` (hard constant, matching the tool description) —
 not configurable.
 
-Provider env vars: `SEARXNG_URL`, `BRAVE_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`
+Provider env vars — `duckduckgo` and `trafilatura` take none and are always on;
+everything below is optional on top of them: `SEARXNG_URL`, `BRAVE_API_KEY`,
+`SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`
 (one key enables the `jina` reader in keyed mode, the `jina-search` provider and
 the search reranker; the reader alone also works keyless), `CRAWL4AI_URL` +
 `CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`, `TAVILY_2_API_KEY`, `FIRECRAWL_API_KEY`.
@@ -115,8 +148,9 @@ setting `<INSTANCE>_PROXY` — useful for clean egress past IP-based blocks (e.g
 Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`,
 `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`,
 `XMLRIVER_PROXY`, `PARALLEL_PROXY`, `OCTEN_PROXY`, `LINKUP_PROXY`,
-`YOUCOM_PROXY`, `BRIGHTDATA_PROXY`. Internal
-instances (`searxng`, `crawl4ai`, `trafilatura`) have no proxy.
+`YOUCOM_PROXY`, `BRIGHTDATA_PROXY`. The instances that do not need clean egress
+have no proxy: the internal `searxng` / `crawl4ai` / `trafilatura` (which still
+take their own url/token vars) and the keyless `duckduckgo`.
 
 The value is passed straight to httpx; `socks5://host:port` does **proxy-side
 DNS** (the target hostname is resolved by the proxy, like `curl

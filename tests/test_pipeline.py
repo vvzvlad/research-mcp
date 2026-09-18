@@ -12,10 +12,11 @@ import respx
 
 from src.pipeline import Pipeline
 from src.providers.base import ProviderError
+from src.providers.duckduckgo import DDG_ENDPOINT
 from src.providers.trafilatura import extract_markdown
 from src.rerank import RERANK_ENDPOINT
 from src.settings import Settings
-from tests.conftest import _clear_provider_env
+from tests.conftest import _clear_provider_env, _mock_duckduckgo_rate_limited
 
 SAMPLE_PDF = (Path(__file__).parent / "fixtures" / "sample.pdf").read_bytes()
 
@@ -40,6 +41,7 @@ async def test_search_merges_and_dedups(monkeypatch, settings):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
     monkeypatch.setenv("SERPER_API_KEY", "k")
+    _mock_duckduckgo_rate_limited()
 
     respx.get("http://searxng.test/search").mock(
         return_value=httpx.Response(
@@ -81,6 +83,55 @@ async def test_search_merges_and_dedups(monkeypatch, settings):
 
 
 @respx.mock
+async def test_searxng_deployment_does_not_degrade_when_duckduckgo_answers(
+    monkeypatch, settings
+):
+    # The acceptance criterion behind duckduckgo's position in SEARCH_PIPELINE:
+    # it sits right after searxng, so on a url both of them return, the searxng
+    # copy survives the dedup and duckduckgo only adds what nobody ahead of it
+    # had. Every other pipeline test rate-limits duckduckgo away; this one lets
+    # it answer.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"url": "https://shared.test/", "title": "Sx Shared", "content": "a"},
+                    {"url": "https://only-sx.test", "title": "Sx Only", "content": "b"},
+                ]
+            },
+        )
+    )
+    respx.post(DDG_ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            text=(
+                '<html><body><div class="result"><a class="result__a" '
+                'href="https://shared.test">DDG Shared</a></div>'
+                '<div class="result"><a class="result__a" '
+                'href="https://only-ddg.test">DDG Only</a></div></body></html>'
+            ),
+        )
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        results = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    shared = [r for r in results if "shared.test" in r.url]
+    assert len(shared) == 1
+    assert shared[0].source == "searxng"  # the earlier source keeps the url
+    urls = [r.url for r in results]
+    assert "https://only-sx.test" in urls
+    assert "https://only-ddg.test" in urls  # and duckduckgo tops the list up
+
+
+@respx.mock
 async def test_search_dedup_prefers_brave_over_serper(monkeypatch, settings):
     # SEARCH_PIPELINE puts brave ahead of serper, and dedup keeps the hit from the
     # earlier provider — so a url both of them return must come back as brave's.
@@ -89,6 +140,7 @@ async def test_search_dedup_prefers_brave_over_serper(monkeypatch, settings):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("BRAVE_API_KEY", "k")
     monkeypatch.setenv("SERPER_API_KEY", "k")
+    _mock_duckduckgo_rate_limited()
 
     respx.get("https://api.search.brave.com/res/v1/web/search").mock(
         return_value=httpx.Response(
@@ -136,6 +188,7 @@ async def test_search_dedup_prefers_brave_over_serper(monkeypatch, settings):
 async def test_search_trims_to_num_results(monkeypatch, settings):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    _mock_duckduckgo_rate_limited()
     results_payload = [
         {"url": f"https://x.test/{i}", "title": f"t{i}", "content": "s"} for i in range(10)
     ]
@@ -155,6 +208,7 @@ async def test_search_clamps_non_positive_num_results(monkeypatch, settings):
     # The public pipeline method must not silently return [] for num<=0.
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    _mock_duckduckgo_rate_limited()
     respx.get("http://searxng.test/search").mock(
         return_value=httpx.Response(
             200, json={"results": [{"url": "https://x.test", "title": "t", "content": "s"}]}
@@ -173,6 +227,7 @@ async def test_exa_clamps_num_results(monkeypatch, settings):
     # Exa must not receive an oversized numResults (would risk a 4xx).
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("EXA_API_KEY", "k")
+    _mock_duckduckgo_rate_limited()
     route = respx.post("https://api.exa.ai/search").mock(
         return_value=httpx.Response(200, json={"results": [{"url": "https://e.test", "title": "E"}]})
     )
@@ -196,7 +251,9 @@ def _mock_search_sources() -> None:
     JINA_API_KEY enables BOTH the reranker and the jina-search instance, so the
     latter must be mocked too — an empty `data` keeps the merge deterministic
     while still counting jina-search as a successful (billed) provider.
+    duckduckgo is always on and is blocked out for the same reason.
     """
+    _mock_duckduckgo_rate_limited()
     respx.get("http://searxng.test/search").mock(
         return_value=httpx.Response(
             200,
@@ -654,6 +711,7 @@ async def test_transient_retry_then_success(monkeypatch, settings):
     # so they cannot demonstrate the shared transient-retry policy.
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SERPER_API_KEY", "k")
+    _mock_duckduckgo_rate_limited()
     route = respx.post("https://google.serper.dev/search")
     route.side_effect = [
         httpx.ConnectError("blip"),  # transient → retried
@@ -677,6 +735,7 @@ async def test_transient_retry_then_success(monkeypatch, settings):
 async def test_search_emits_per_request_log(monkeypatch, settings, capture_logs):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    _mock_duckduckgo_rate_limited()
     respx.get("http://searxng.test/search").mock(
         return_value=httpx.Response(
             200, json={"results": [{"url": "https://ok.test", "title": "OK", "content": "s"}]}
@@ -715,9 +774,11 @@ async def test_read_emits_per_request_log(monkeypatch, settings, capture_logs):
 @respx.mock
 async def test_search_log_counts_paid_calls(monkeypatch, settings, capture_logs):
     # searxng (free) + serper (paid) both return → 1 paid of 2 billed = 50.0%.
+    # duckduckgo is blocked out so it does not add a third (free) billed call.
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
     monkeypatch.setenv("SERPER_API_KEY", "k")
+    _mock_duckduckgo_rate_limited()
     respx.get("http://searxng.test/search").mock(
         return_value=httpx.Response(
             200, json={"results": [{"url": "https://sx.test", "title": "Sx", "content": "a"}]}
@@ -822,6 +883,7 @@ async def test_proxied_provider_still_serves(monkeypatch, settings):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("EXA_API_KEY", "k")
     monkeypatch.setenv("EXA_PROXY", "socks5://proxy.invalid:1080")
+    _mock_duckduckgo_rate_limited()
     respx.post("https://api.exa.ai/search").mock(
         return_value=httpx.Response(
             200, json={"results": [{"url": "https://e.test", "title": "Exa via proxy"}]}

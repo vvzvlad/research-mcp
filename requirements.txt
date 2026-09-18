@@ -1,6 +1,9 @@
 mcp==1.28.0
 httpx[socks]==0.28.1
 trafilatura==2.1.0
+# Direct import in src/providers/duckduckgo.py (lxml.html parses the no-JS SERP).
+# trafilatura already pulls lxml in, but a direct import must be a direct pin.
+lxml==6.1.3
 pypdf==6.14.2
 pydantic-settings==2.7.0
 loguru==0.7.2

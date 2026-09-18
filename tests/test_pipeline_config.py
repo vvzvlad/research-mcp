@@ -12,6 +12,7 @@ from src.config_errors import ConfigError
 from src.pipeline import Pipeline, _resolve_instance
 from src.pipeline_config import INSTANCES, PAID_TYPES, READ_PIPELINE, SEARCH_PIPELINE
 from src.providers.brave import BraveSearch
+from src.providers.duckduckgo import DuckDuckGoSearch
 from src.providers.jina_search import JinaSearch
 from tests.conftest import _clear_provider_env
 
@@ -42,8 +43,8 @@ def test_instances_store_env_names_not_values():
 
 
 def test_paid_types_classification():
-    # Self-hosted / free types are never billed.
-    for free in ("searxng", "trafilatura", "crawl4ai"):
+    # Self-hosted / free types (and keyless duckduckgo) are never billed.
+    for free in ("searxng", "duckduckgo", "trafilatura", "crawl4ai"):
         assert free not in PAID_TYPES
     # External metered APIs are billed (jina is metered when keyed, jina_search
     # always needs a key; brave's free plan gives 2000 queries a month and then
@@ -55,13 +56,19 @@ def test_paid_types_classification():
 
 def test_search_pipeline_order():
     # Order is load-bearing: dedup keeps the hit from the earlier provider, so
-    # this list is the preference order. Proven and free first (searxng, brave,
-    # then the tavily/firecrawl search allowances we already pay for as part of
-    # their reader keys), then the proven paid workhorse jina-search, then the
-    # vendors we hold no key for yet, cheapest first, then serper (dead balance,
-    # kept wired) and exa (the most expensive).
+    # this list is the preference order. Proven and free first (searxng, then
+    # keyless duckduckgo, then brave, then the tavily/firecrawl search
+    # allowances we already pay for as part of their reader keys), then the
+    # proven paid workhorse jina-search, then the vendors we hold no key for
+    # yet, cheapest first, then serper (dead balance, kept wired) and exa (the
+    # most expensive).
+    #
+    # duckduckgo's slot right behind searxng is the load-bearing one: it is the
+    # only always-on search instance, so a deployment that DOES run SearXNG must
+    # keep seeing SearXNG's copy of every shared url, not DuckDuckGo's.
     assert SEARCH_PIPELINE == [
         "searxng",
+        "duckduckgo",
         "brave",
         "tavily-search",
         "firecrawl-search",
@@ -154,7 +161,9 @@ def test_build_enables_brave_from_its_key(monkeypatch, settings):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("BRAVE_API_KEY", "k")
     pipe = Pipeline.build(settings, client=httpx.AsyncClient())
-    assert pipe.search_names == ["brave"]
+    # duckduckgo needs no ENV, so it is always there alongside whatever a key
+    # turned on — that is the point of it, see test_build_with_no_env_at_all.
+    assert pipe.search_names == ["duckduckgo", "brave"]
     brave = next(p for p in pipe._search if p.name == "brave")
     assert isinstance(brave, BraveSearch)
     assert brave.proxy is None  # no BRAVE_PROXY → direct egress
@@ -166,7 +175,7 @@ def test_build_enables_jina_search_from_the_shared_jina_key(monkeypatch, setting
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("JINA_API_KEY", "k")
     pipe = Pipeline.build(settings, client=httpx.AsyncClient())
-    assert pipe.search_names == ["jina-search"]
+    assert pipe.search_names == ["duckduckgo", "jina-search"]  # duckduckgo is always on
     jina_search = next(p for p in pipe._search if p.name == "jina-search")
     assert isinstance(jina_search, JinaSearch)
     assert "jina" in pipe.read_names  # the same key feeds the reader
@@ -234,12 +243,43 @@ def test_build_threads_proxy_into_provider(monkeypatch, settings):
     assert searxng.proxy is None
 
 
-def test_build_requires_one_search_provider(monkeypatch, settings):
+def test_build_with_no_env_at_all(monkeypatch, settings):
+    # This used to assert ConfigError("No search provider enabled"): with no keys
+    # the server refused to start, so the "free minimum" was really "first deploy
+    # a SearXNG". duckduckgo (keyless, no variable of any kind) closes the search
+    # half the way trafilatura closes the read half — a completely empty
+    # environment must now BUILD, and search.
     _clear_provider_env(monkeypatch)
-    # trafilatura/jina give read providers, but no search provider is enabled.
+    pipe = Pipeline.build(settings, client=httpx.AsyncClient())
+    assert pipe.search_names == ["duckduckgo"]  # the only one that needs nothing
+    assert isinstance(pipe._search[0], DuckDuckGoSearch)
+    assert pipe.read_names[0] == "trafilatura"  # its read-side counterpart
+    # Keyless means unbilled: an empty env must cost nothing.
+    assert "duckduckgo" not in pipe._paid
+
+
+def test_config_error_still_guards_an_empty_search_pipeline(monkeypatch, settings):
+    # The ConfigError branch stays: duckduckgo makes it unreachable through ENV,
+    # but not through a broken SEARCH_PIPELINE (a renamed instance, a provider
+    # whose __init__ raised). Simulated by emptying the pipeline list.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr("src.pipeline.SEARCH_PIPELINE", [])
     with pytest.raises(ConfigError) as ei:
         Pipeline.build(settings, client=httpx.AsyncClient())
     assert "search provider" in str(ei.value).lower()
+
+
+def test_duckduckgo_instance_needs_no_variable(monkeypatch):
+    # The whole contract of this instance is the absence of config: any env name
+    # added here would silently make it switchable off again.
+    ddg = _inst("duckduckgo")
+    assert ddg.type == "duckduckgo"
+    assert ddg.url_env is None
+    assert ddg.api_key_env is None
+    assert ddg.token_env is None
+    assert ddg.proxy_env is None
+    _clear_provider_env(monkeypatch)
+    assert _resolve_instance(ddg) is not None  # enabled on an empty environment
 
 
 def test_build_enables_expected_instances(monkeypatch, settings):
@@ -247,8 +287,9 @@ def test_build_enables_expected_instances(monkeypatch, settings):
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
     monkeypatch.setenv("TAVILY_2_API_KEY", "t2")
     pipe = Pipeline.build(settings, client=httpx.AsyncClient())
-    # Only searxng among search; trafilatura+jina always-on plus tavily-2.
-    assert pipe.search_names == ["searxng"]
+    # searxng among the keyed search instances, with the always-on duckduckgo
+    # behind it; trafilatura+jina always-on plus tavily-2 on the read side.
+    assert pipe.search_names == ["searxng", "duckduckgo"]
     assert "trafilatura" in pipe.read_names
     assert "jina" in pipe.read_names
     assert "tavily-2" in pipe.read_names

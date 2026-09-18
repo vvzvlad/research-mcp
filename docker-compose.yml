@@ -5,9 +5,11 @@
 # Traefik, not the app. The only persistent state is the log file under
 # /app/data, kept on a named volume so it survives restarts and image updates.
 #
-# Provider instances are enabled by which env vars are set. Set at least one
-# search (SEARXNG_URL / BRAVE_API_KEY / SERPER_API_KEY / EXA_API_KEY) and rely on trafilatura +
-# any read providers you configure. Leave a var out to disable that instance.
+# Provider instances are enabled by which env vars are set. Every var below is
+# OPTIONAL: duckduckgo (search) and trafilatura (read) need no configuration and
+# are always on, so the service starts and both tools work with none of them set.
+# Add SEARXNG_URL / BRAVE_API_KEY / ... to put better providers in front of that
+# floor; leave a var out to disable that instance.
 
 volumes:
   research_mcp_data:

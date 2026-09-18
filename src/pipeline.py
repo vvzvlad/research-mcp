@@ -294,11 +294,14 @@ class Pipeline:
         search_instances = [built[name] for name in SEARCH_PIPELINE if name in built]
         read_instances = [built[name] for name in READ_PIPELINE if name in built]
 
+        # Unreachable on any normal configuration since duckduckgo needs no ENV
+        # and is therefore always enabled — kept as the guard against a
+        # SEARCH_PIPELINE that names no buildable instance (a rename, a deleted
+        # Instance, a provider whose __init__ raised).
         if not search_instances:
             raise ConfigError(
-                "No search provider enabled. Set at least one of "
-                "SEARXNG_URL / BRAVE_API_KEY / JINA_API_KEY / SERPER_API_KEY / "
-                "EXA_API_KEY."
+                "No search provider enabled. duckduckgo needs no config, so this "
+                "should not happen — check src/pipeline_config.py."
             )
         if not read_instances:
             raise ConfigError(
