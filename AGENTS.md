@@ -45,9 +45,10 @@ a volume across restarts/image updates).
 - stderr + a persistent file sink at `data/research-mcp.log` (loguru rotation +
   retention; survives restart/image update via the `data/` volume).
 - `pipeline.search` / `pipeline.read` emit one per-request line each (tool,
-  target url/query, winning provider/tier or `pdf`, count, latency, ok);
-  `read_pages` adds a `count/ok` summary. Never log bodies or secrets (proxy
-  URLs and keys are never logged).
+  target url/query, winning provider/tier or `pdf`, count, latency, ok); the
+  search line also names the instances that came back `empty=` and those that
+  `failed=`; `read_pages` adds a `count/ok` summary. Never log bodies or secrets
+  (proxy URLs and keys are never logged).
 
 ## Proxy (per instance)
 - An external instance can route through a SOCKS5/HTTP proxy via `<INSTANCE>_PROXY`

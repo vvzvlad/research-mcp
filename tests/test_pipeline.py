@@ -4,12 +4,14 @@ All network I/O is mocked with respx. Pipelines are built via ``Pipeline.build``
 with monkeypatched provider ENV so we control exactly which instances are on.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
+from src.formatting import format_search_results
 from src.pipeline import Pipeline
 from src.providers.base import ProviderError
 from src.providers.trafilatura import extract_markdown
@@ -67,7 +69,7 @@ async def test_search_merges_and_dedups(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=10, page=1, language=None)
+        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -118,7 +120,7 @@ async def test_search_dedup_prefers_brave_over_serper(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=10, page=1, language=None)
+        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -144,7 +146,7 @@ async def test_search_trims_to_num_results(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=3, page=1, language=None)
+        results = (await pipe.search("q", num_results=3, page=1, language=None)).results
     finally:
         await pipe.aclose()
     assert len(results) == 3
@@ -162,7 +164,7 @@ async def test_search_clamps_non_positive_num_results(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=0, page=1, language=None)
+        results = (await pipe.search("q", num_results=0, page=1, language=None)).results
     finally:
         await pipe.aclose()
     assert len(results) == 1  # clamped up to 1, not empty
@@ -187,6 +189,133 @@ async def test_exa_clamps_num_results(monkeypatch, settings):
     assert _json.loads(sent_body)["numResults"] == 50  # clamped to EXA_NUM_RESULTS_MAX
 
 
+# -- search outcome: a dead search vs an empty one -------------------------
+
+
+@respx.mock
+async def test_search_all_instances_failing_renders_as_a_failure(monkeypatch, settings):
+    # Every launched instance raises → the rendered answer must say the SEARCH
+    # broke (retry is worth it), not that the topic does not exist.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    respx.get("http://searxng.test/search").mock(return_value=httpx.Response(500))
+    respx.post("https://google.serper.dev/search").mock(return_value=httpx.Response(429))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.results == []
+    assert outcome.attempted == ["searxng", "serper"]
+    assert outcome.failed == ["searxng", "serper"]
+    assert outcome.answered == []
+    assert outcome.empty == []
+
+    rendered = format_search_results(outcome, query="q", page=1)
+    assert "ничего не найдено" not in rendered.lower()
+    assert "сбой поиска" in rendered.lower()
+    # ...and it is a different text from the one the same query gets when an
+    # instance really answered with nothing.
+    answered_nothing = replace(outcome, answered=["searxng"], failed=["serper"])
+    assert rendered != format_search_results(answered_nothing, query="q", page=1)
+
+
+@respx.mock
+async def test_search_empty_instance_answers_render_as_nothing_found(monkeypatch, settings):
+    # 200 + zero hits from every instance (SearXNG alive, engines blocked) is an
+    # honestly empty result — the unchanged "ничего не найдено" text.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(200, json={"organic": []})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.results == []
+    assert outcome.empty == ["searxng", "serper"]
+    assert outcome.answered == []
+    assert outcome.failed == []
+
+    rendered = format_search_results(outcome, query="ничего такого", page=2)
+    assert "ничего не найдено" in rendered.lower()
+    assert "ничего такого" in rendered
+
+
+@respx.mock
+async def test_empty_instance_answer_is_not_billed(monkeypatch, settings, capture_logs):
+    # serper is a PAID instance, but a 200 with zero hits bought nothing, so it
+    # must not move the paid counters — only searxng's answering call is counted.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(
+            200, json={"results": [{"url": "https://sx.test", "title": "Sx", "content": "a"}]}
+        )
+    )
+    respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(200, json={"organic": []})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    line = next((m for m in capture_logs if m.startswith("search query=")), None)
+    assert line is not None
+    assert "empty=['serper']" in line
+    assert "paid_calls=0" in line
+    assert "cum_paid=0" in line
+    assert "cum_calls=1" in line  # searxng only — the empty serper call is free
+
+
+@respx.mock
+async def test_search_log_reports_empty_and_failed_instances(monkeypatch, settings, capture_logs):
+    # One instance answers, one answers with nothing, one fails — the per-request
+    # line must keep the three apart instead of collapsing them into providers=.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    monkeypatch.setenv("EXA_API_KEY", "k")
+    respx.get("http://searxng.test/search").mock(
+        return_value=httpx.Response(
+            200, json={"results": [{"url": "https://sx.test", "title": "Sx", "content": "a"}]}
+        )
+    )
+    respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(200, json={"organic": []})
+    )
+    respx.post("https://api.exa.ai/search").mock(return_value=httpx.Response(429))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search("q", num_results=10, page=1, language=None)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.hits_before_dedup == 1
+    line = next((m for m in capture_logs if m.startswith("search query=")), None)
+    assert line is not None
+    assert "providers=['searxng']" in line
+    assert "empty=['serper']" in line
+    assert "failed=['exa']" in line
+    assert "results=1" in line
+
+
 # -- post-merge rerank ------------------------------------------------------
 
 
@@ -195,7 +324,7 @@ def _mock_search_sources() -> None:
 
     JINA_API_KEY enables BOTH the reranker and the jina-search instance, so the
     latter must be mocked too — an empty `data` keeps the merge deterministic
-    while still counting jina-search as a successful (billed) provider.
+    and lands jina-search in the `empty=[...]` bucket (answered, but unbilled).
     """
     respx.get("http://searxng.test/search").mock(
         return_value=httpx.Response(
@@ -234,7 +363,7 @@ async def test_search_rerank_reorders_and_is_accounted(monkeypatch, settings, ca
 
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=10, page=1, language=None)
+        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -247,10 +376,13 @@ async def test_search_rerank_reorders_and_is_accounted(monkeypatch, settings, ca
     line = next((m for m in capture_logs if m.startswith("search query=")), None)
     assert line is not None
     assert "reranked=true" in line
-    # jina-rerank is billed (jina-search + jina-rerank = 2 paid of 3 calls)...
-    assert "paid_calls=2" in line
-    # ...but it is NOT a search provider, so it stays out of providers=[...].
-    assert "providers=['searxng', 'jina-search']" in line
+    # jina-rerank is billed; jina-search answered with zero hits, so it is not
+    # (1 paid of 2 billed calls: searxng + jina-rerank).
+    assert "paid_calls=1" in line
+    # jina-rerank is NOT a search provider, so it stays out of providers=[...],
+    # and the empty jina-search moves to empty=[...].
+    assert "providers=['searxng']" in line
+    assert "empty=['jina-search']" in line
 
 
 @respx.mock
@@ -266,7 +398,7 @@ async def test_search_rerank_failure_falls_back_to_merge_order(
     pipe = Pipeline.build(settings)
     try:
         # Must NOT raise: a broken reranker degrades to the original order.
-        results = await pipe.search("q", num_results=10, page=1, language=None)
+        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -278,8 +410,9 @@ async def test_search_rerank_failure_falls_back_to_merge_order(
     line = next((m for m in capture_logs if m.startswith("search query=")), None)
     assert line is not None
     assert "reranked=false" in line
-    # The failed rerank call is not billed — only jina-search is paid here.
-    assert "paid_calls=1" in line
+    # The failed rerank call is not billed, and the empty jina-search is not
+    # either → no paid call at all on this request.
+    assert "paid_calls=0" in line
 
 
 @respx.mock
@@ -300,7 +433,7 @@ async def test_search_rerank_empty_ranking_falls_back_to_merge_order(
     pipe = Pipeline.build(settings)
     try:
         # Must NOT raise: the anomaly degrades to the original order.
-        results = await pipe.search("q", num_results=10, page=1, language=None)
+        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -663,7 +796,7 @@ async def test_transient_retry_then_success(monkeypatch, settings):
     ]
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=5, page=1, language=None)
+        results = (await pipe.search("q", num_results=5, page=1, language=None)).results
     finally:
         await pipe.aclose()
     assert any(r.url == "https://ok.test" for r in results)
@@ -829,7 +962,7 @@ async def test_proxied_provider_still_serves(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        results = await pipe.search("q", num_results=5, page=1, language=None)
+        results = (await pipe.search("q", num_results=5, page=1, language=None)).results
         assert any(r.url == "https://e.test" for r in results)
         # The proxied exa client is distinct from the direct client.
         proxied = pipe._clients.client_for("socks5://proxy.invalid:1080")

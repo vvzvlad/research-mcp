@@ -154,10 +154,10 @@ class BraveSearch:
         # web_search behind it.
         #
         # Raise ProviderError instead of returning []: Pipeline._one() catches it,
-        # logs "search '<name>' failed: ..." and leaves the instance out of the
-        # providers=[...] list. An empty list would instead be recorded as a
-        # successful (and billed-looking) run, and the log would claim brave took
-        # part when it did not.
+        # logs "search '<name>' failed: ..." and the instance lands in failed=[...]
+        # rather than empty=[...]. Returning [] would instead claim brave ran and
+        # found nothing, which format_search_results renders as "ничего не найдено"
+        # — a skipped slot must never look like an honest empty result.
         #
         # The check and the assignment are adjacent with no await between them, so
         # under asyncio they are atomic — no lock is needed here, do not add one.

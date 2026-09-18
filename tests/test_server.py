@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from src.pipeline import SearchOutcome
 from src.providers.base import ProviderError, SearchResult
 from src.server import build_server
 
@@ -20,7 +21,17 @@ class FakePipeline:
         self.closed = True
 
     async def search(self, query, num_results, page, language):
-        return [SearchResult(title="Hit", url="https://x.test", snippet="snip", source="searxng")]
+        hit = SearchResult(title="Hit", url="https://x.test", snippet="snip", source="searxng")
+        return SearchOutcome(
+            results=[hit],
+            attempted=["searxng"],
+            answered=["searxng"],
+            empty=[],
+            failed=[],
+            hits_before_dedup=1,
+            reranked=False,
+            elapsed_ms=3,
+        )
 
     async def read(self, url):
         if "boom" in url:

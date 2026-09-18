@@ -81,10 +81,10 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
     ) -> str:
         count = max(1, min(num_results, SEARCH_RESULTS_MAX))
         try:
-            results = await pipeline.search(query, count, page, language)
+            outcome = await pipeline.search(query, count, page, language)
         except ProviderError as exc:
             return str(exc)
-        return format_search_results(results, query=query, page=page)
+        return format_search_results(outcome, query=query, page=page)
 
     @mcp.tool(
         name="read_page",

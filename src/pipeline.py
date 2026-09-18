@@ -9,7 +9,10 @@ Search runs all enabled ``SEARCH_PIPELINE`` instances concurrently, merges and
 deduplicates by normalized url (pipeline order wins), optionally reranks the
 full merged list with the Jina reranker (``src/rerank.py`` — enabled by
 ``JINA_API_KEY`` + ``settings.search_rerank_enabled``, falls back to the merge
-order on any failure), and trims to ``num_results``.
+order on any failure), and trims to ``num_results``. It returns a
+``SearchOutcome``: the results plus which instances answered, came back empty
+or failed — so the caller can tell "nothing matched" from "the search itself
+broke".
 
 Read first detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic) and
 extracts them with pypdf. Otherwise it tries the enabled ``READ_PIPELINE``
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 import os
 import ssl
 import time
@@ -53,6 +57,27 @@ from src.providers.registry import REGISTRY
 from src.providers.trafilatura import TrafilaturaRead, extract_markdown
 from src.rerank import JinaReranker
 from src.settings import Settings
+
+
+@dataclass(slots=True)
+class SearchOutcome:
+    """One search request: its results plus what the instances actually did.
+
+    The three buckets are disjoint and together cover ``attempted``: an instance
+    either answered with hits, answered with nothing, or failed. They exist so a
+    caller can tell an honestly empty result set ("nobody has this") from a dead
+    search ("every provider fell over"), which look identical when only
+    ``results`` is returned.
+    """
+
+    results: list[SearchResult]  # merged, deduped, reranked, trimmed
+    attempted: list[str]  # instances launched, in pipeline order
+    answered: list[str]  # returned at least one hit
+    empty: list[str]  # returned without error but zero hits
+    failed: list[str]  # raised ProviderError or crashed
+    hits_before_dedup: int  # total hits across the answering providers
+    reranked: bool
+    elapsed_ms: int
 
 
 def _is_tls_verify_error(exc: Exception) -> bool:
@@ -347,8 +372,12 @@ class Pipeline:
         """Fold one request's billed upstream calls into the cumulative counters.
 
         `billed` = names of provider instances whose upstream call returned data
-        (a billed 200; thin results count, raised/errored calls do not). The
-        list may also carry the pseudo-instance name "jina-rerank" for a
+        (a billed 200; thin read results count, raised/errored calls do not). A
+        search instance that answered with ZERO hits is NOT billed either
+        (SearXNG alive but its engines blocked, a keyed provider returning an
+        empty page): it stays out of BOTH counters, so the ratio keeps a single
+        meaning — of the calls that actually bought data, how many were paid.
+        The list may also carry the pseudo-instance name "jina-rerank" for a
         successful rerank call — deliberately not an Instance in
         pipeline_config, so do not look for it in INSTANCES. Returns
         (paid_calls_this_request, cumulative_paid_percent). Mutates the counters
@@ -368,8 +397,12 @@ class Pipeline:
         num_results: int,
         page: int,
         language: str | None,
-    ) -> list[SearchResult]:
-        """Run all search instances concurrently, merge + dedup, trim."""
+    ) -> SearchOutcome:
+        """Run all search instances concurrently, merge + dedup, trim.
+
+        Returns a ``SearchOutcome`` — the results plus the per-instance
+        answered/empty/failed telemetry.
+        """
         # Defend the public method too: a non-positive count would otherwise
         # silently return nothing. (The server already does max(1, ...).)
         num_results = max(1, num_results)
@@ -390,17 +423,28 @@ class Pipeline:
                 logger.warning("search '{}' crashed: {}", provider.name, exc)
                 return provider.name, None
 
+        attempted = [p.name for p in self._search]
         # Gather in pipeline order; results keep that order so dedup prefers the
         # earlier (higher-priority) provider.
         batches = await asyncio.gather(*(_one(p) for p in self._search))
 
-        used: list[str] = []
+        # Three disjoint buckets, filled from what _one already distinguishes:
+        # None = the instance failed, [] = it answered with nothing.
+        answered: list[str] = []
+        empty: list[str] = []
+        failed: list[str] = []
+        hits_before_dedup = 0
         merged: list[SearchResult] = []
         seen: set[str] = set()
         for name, hits in batches:
             if hits is None:
+                failed.append(name)
                 continue
-            used.append(name)
+            if not hits:
+                empty.append(name)
+                continue
+            answered.append(name)
+            hits_before_dedup += len(hits)
             for result in hits:
                 key = _normalize_url(result.url)
                 if key in seen:
@@ -433,21 +477,24 @@ class Pipeline:
         merged = merged[:num_results]
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        # The billed calls are exactly `used`: each successful search provider
-        # returned data (a billed 200) — plus the rerank call when it went
-        # through (metered too). A rerank that answered 200 with an anomalous
+        # The billed calls are exactly `answered`: those providers returned data
+        # (a billed 200) — plus the rerank call when it went through (metered
+        # too). An instance that answered with zero hits bought nothing, so it
+        # stays out (see _account). A rerank that answered 200 with an anomalous
         # body (empty/malformed ranking → ProviderError) is deliberately NOT
         # billed, consistent with search providers whose response failed to
         # parse. The rerank joins only the accounting list, never the
         # providers=[...] one: it produced no results of its own.
-        billed = [*used, self._reranker.name] if reranked and self._reranker else used
+        billed = [*answered, self._reranker.name] if reranked and self._reranker else answered
         paid_calls, pct = self._account(billed)
         # One per-request line for the persistent log (no bodies/secrets).
         logger.info(
-            "search query={!r} providers={} results={} reranked={} paid_calls={} "
-            "cum_paid={} cum_calls={} paid_pct={:.1f}% elapsed_ms={}",
+            "search query={!r} providers={} empty={} failed={} results={} reranked={} "
+            "paid_calls={} cum_paid={} cum_calls={} paid_pct={:.1f}% elapsed_ms={}",
             query,
-            used,
+            answered,
+            empty,
+            failed,
             len(merged),
             "true" if reranked else "false",
             paid_calls,
@@ -456,7 +503,16 @@ class Pipeline:
             pct,
             elapsed_ms,
         )
-        return merged
+        return SearchOutcome(
+            results=merged,
+            attempted=attempted,
+            answered=answered,
+            empty=empty,
+            failed=failed,
+            hits_before_dedup=hits_before_dedup,
+            reranked=reranked,
+            elapsed_ms=elapsed_ms,
+        )
 
     # -- read ---------------------------------------------------------------
 
