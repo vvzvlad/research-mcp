@@ -19,7 +19,9 @@ a volume across restarts/image updates).
 - `src/providers/base.py` — `SearchProvider` / `ReadProvider` interfaces,
   `SearchResult`, `ProviderError`, `ProviderConfig`.
 - `src/providers/registry.py` — `@register` decorator + `REGISTRY`.
-- `src/providers/_http.py` — shared retry + 402/429 → failover policy.
+- `src/providers/_http.py` — shared retry + 402/429 → failover policy, plus
+  `_CREDIT_MARKERS`: a 4xx whose body reports an exhausted balance (serper's
+  400, octen's 403) is classified as `out of credits`, not `client error`.
 - `src/providers/_url_guard.py` — SSRF guard: `ensure_url_allowed` rejects
   non-http(s) schemes and urls resolving into private/loopback/link-local
   networks (entry check in `read` + httpx hook on every redirect hop);

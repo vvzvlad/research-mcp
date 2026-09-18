@@ -10,13 +10,21 @@ decorator runs and populates ``REGISTRY``.
 
 from src.providers import (  # noqa: F401  (imported for their @register side effects)
     brave,
+    brightdata,
     crawl4ai,
     exa,
     firecrawl,
+    firecrawl_search,
     jina,
     jina_search,
+    linkup_search,
+    octen_search,
+    parallel_search,
     searxng,
     serper,
     tavily,
+    tavily_search,
     trafilatura,
+    xmlriver_search,
+    youcom_search,
 )

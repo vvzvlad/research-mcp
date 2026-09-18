@@ -54,11 +54,26 @@ def test_paid_types_classification():
 
 
 def test_search_pipeline_order():
-    # Order is load-bearing: dedup keeps the hit from the earlier provider. The
-    # free/quota providers (searxng, brave) go first, then jina-search at a
-    # fixed ~$0.0005/query, then serper (dead key, kept wired), then exa (the
-    # most expensive).
-    assert SEARCH_PIPELINE == ["searxng", "brave", "jina-search", "serper", "exa"]
+    # Order is load-bearing: dedup keeps the hit from the earlier provider, so
+    # this list is the preference order. Proven and free first (searxng, brave,
+    # then the tavily/firecrawl search allowances we already pay for as part of
+    # their reader keys), then the proven paid workhorse jina-search, then the
+    # vendors we hold no key for yet, cheapest first, then serper (dead balance,
+    # kept wired) and exa (the most expensive).
+    assert SEARCH_PIPELINE == [
+        "searxng",
+        "brave",
+        "tavily-search",
+        "firecrawl-search",
+        "jina-search",
+        "xmlriver",
+        "parallel",
+        "octen",
+        "linkup",
+        "youcom",
+        "serper",
+        "exa",
+    ]
 
 
 def test_every_pipeline_name_has_an_instance():
