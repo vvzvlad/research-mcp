@@ -60,9 +60,9 @@ _EXCERPT_SEPARATOR = "\n\n"
 # whose snippet is a sentence or two, an untrimmed hit could put tens of
 # kilobytes into a single web_search answer. 1000 chars is the threshold the
 # project already applies to a search result's text — see the document builder
-# in src/rerank.py, which truncates at exactly this before sending to the
-# reranker — so the snippet the model reads and the text the reranker scores
-# stay the same length.
+# in src/rerank.py, which truncates "{title}\n{snippet}" at exactly this before
+# sending it to the reranker — so the model and the reranker read texts of the
+# same order rather than one seeing kilobytes the other never scored.
 _SNIPPET_MAX_CHARS = 1000
 
 

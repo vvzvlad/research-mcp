@@ -64,7 +64,10 @@ _ESCALATIONS: tuple[tuple[str, dict[str, str], bool], ...] = (
     # Reaching a scan at all depends on Pipeline.read: a text-free PDF used to
     # return pypdf's "no text layer" notice as a success and never entered the
     # read chain. That branch now falls through to us and keeps the notice only
-    # as a last resort — do not turn it back into an early return.
+    # as a last resort — do not turn it back into an early return. Note the gate
+    # is the URL PATH, so this step sees a scan only when the url ends in .pdf;
+    # one recognised by Content-Type or %PDF magic alone reaches the chain but
+    # not this step.
     # Price: 40x tokens, the most expensive step there is — hence last, and
     # hence never on a non-pdf url. The arithmetic, at X-Token-Budget=100000:
     # worst case 100000 * 40 = ~4M tokens, i.e. ~$0.20 for one page on the $50

@@ -314,15 +314,33 @@ async def test_error_envelope_inside_http_200_raises(make_config):
 
 
 @respx.mock
-async def test_string_zero_envelope_code_is_success(make_config):
-    # The documented success value is the number 0; a stricter-typing day that
-    # sends "0" must not read as a failure.
-    payload = {**OCTEN_PAYLOAD, "code": "0"}
+@pytest.mark.parametrize(
+    ("code", "is_success"),
+    [
+        (0, True),  # documented success value
+        ("0", True),  # a stricter-typing day must not read as a failure
+        (None, True),  # absent code: nothing to object to
+        (1001, False),
+        ("500", False),
+    ],
+)
+async def test_envelope_code_decides_success(make_config, code, is_success):
+    # One test for both directions, so it pins the guard itself and not just the
+    # string/int normalisation: drop the guard and the two error rows fail.
+    payload = {**OCTEN_PAYLOAD}
+    if code is None:
+        payload.pop("code")
+    else:
+        payload["code"] = code
     respx.post(OCTEN_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        out = await provider.search(client, "q", 5, 1, None)
-    assert out
+        if is_success:
+            assert await provider.search(client, "q", 5, 1, None)
+        else:
+            with pytest.raises(ProviderError) as excinfo:
+                await provider.search(client, "q", 5, 1, None)
+            assert "API error" in str(excinfo.value)
 
 
 @respx.mock

@@ -510,10 +510,21 @@ class Pipeline:
         pdf_text, probe_html = await self._probe(self._clients.guarded_client_for(None), url)
         # A PDF with a text layer is done here. A PDF WITHOUT one is a scan:
         # pypdf has nothing to give and used to return the notice as a success,
-        # which meant a scan never reached the read chain — and so never reached
-        # jina's OCR tier, which exists for exactly this case. Fall through
+        # which meant a scan never reached the read chain at all. Fall through
         # instead, keeping the notice as the last resort if the chain also comes
         # back empty (the behaviour callers had before).
+        #
+        # What the chain can actually do with a scan, precisely: every reader
+        # here fetches PDFs server-side with its own parser, so any of them may
+        # find text pypdf could not. jina's OCR tier is the strongest of them,
+        # but it is gated on the URL PATH ending in .pdf (_is_pdf_url in
+        # providers/jina.py) — while this branch also fires for PDFs recognised
+        # by Content-Type or by the %PDF magic alone. So a scan served from
+        # something like /download?id=123 now costs a full chain walk and still
+        # never reaches OCR. That is a real cost for that shape of url, taken
+        # because the other readers are a genuine chance and the case is rare;
+        # widening the OCR gate would mean passing the probe's verdict down into
+        # the provider, which the ReadProvider protocol has no room for today.
         pdf_notice: str | None = None
         if pdf_text is not None:
             if pdf_text != NO_TEXT_LAYER_NOTICE:
