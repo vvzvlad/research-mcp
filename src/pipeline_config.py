@@ -44,10 +44,19 @@ class Instance:
 # instances of one type are allowed (tavily-1 / tavily-2 with different keys).
 # External (public-internet) instances carry a `proxy_env` so they can be routed
 # through a clean-egress SOCKS5/HTTP proxy (some are IP-blocked by Cloudflare).
-# Internal/local instances (searxng, crawl4ai, trafilatura) have NO proxy_env.
+# No `proxy_env` for the instances that do not need clean egress: the internal
+# ones (searxng/crawl4ai/trafilatura — they still name their own url/token vars)
+# and duckduckgo, which is external but keyless.
 INSTANCES: list[Instance] = [
     # --- search ---
     Instance("searxng", "searxng", url_env="SEARXNG_URL"),
+    # No key, no url, no variable of any kind: the only search instance that is
+    # ALWAYS enabled. It is the search half of the zero-config floor (the
+    # trafilatura of searching), which is what keeps `Pipeline.build` working on
+    # a completely empty environment — before it, "free minimum" meant "first
+    # deploy a SearXNG". It scrapes the no-JS SERP, so it is free but fragile:
+    # it sits behind searxng in the pipeline, never in front of it.
+    Instance("duckduckgo", "duckduckgo"),
     # Brave reaches its API fine from this host directly (verified 2026-08-09);
     # the proxy var exists only for symmetry with the other external instances.
     Instance("brave", "brave", api_key_env="BRAVE_API_KEY", proxy_env="BRAVE_PROXY"),
@@ -131,15 +140,25 @@ INSTANCES: list[Instance] = [
 # source. Cost scales with how many instances are ENABLED, not with position —
 # so enabling all of them means paying all of them on every single query.
 #
-# Order: proven and free first (searxng self-hosted, brave's 2000/month), then
-# tavily-search and firecrawl-search — no new secret, but NOT free: they spend
-# the same monthly pool as their own readers, see the instance comment above.
-# Then the proven paid workhorse jina-search at ~$0.0005/query, then the vendors
-# we have no key for yet, cheapest first (xmlriver ~$0.0003 on the Yandex index,
-# parallel and octen at $1/1k, linkup and youcom at $5/1k), then serper, then
-# exa at $7/1k.
+# Order: proven and free first (searxng self-hosted, then keyless duckduckgo,
+# then brave's 2000/month), then tavily-search and firecrawl-search — no new
+# secret, but NOT free: they spend the same monthly pool as their own readers,
+# see the instance comment above. Then the proven paid workhorse jina-search at
+# ~$0.0005/query, then the vendors we have no key for yet, cheapest first
+# (xmlriver ~$0.0003 on the Yandex index, parallel and octen at $1/1k, linkup
+# and youcom at $5/1k), then serper, then exa at $7/1k.
+#
+# duckduckgo sits DIRECTLY AFTER searxng, and that position is load-bearing:
+# it needs no key, so it is on in every deployment, but it is a scrape of a
+# public SERP rather than an API. Behind searxng, dedup (which prefers the
+# earlier source) keeps SearXNG's copy of every shared url, and duckduckgo adds
+# only what nobody ahead of it returned. Note what this does NOT promise: with
+# the reranker on (the default once JINA_API_KEY is set) the merged list is
+# reordered by relevance across ALL sources before the trim, so the final order
+# — and which hits survive num_results — can change.
 SEARCH_PIPELINE: list[str] = [
     "searxng",
+    "duckduckgo",
     "brave",
     "tavily-search",
     "firecrawl-search",
@@ -167,11 +186,12 @@ READ_PIPELINE: list[str] = [
 
 # Provider TYPES that bill per successful request (external metered APIs). Used
 # ONLY for usage accounting in the logs. Self-hosted / free types (searxng,
-# trafilatura, crawl4ai) are never counted as paid. jina is metered when an API
-# key is configured, so it is classified as paid. brave is metered too: the free
-# plan grants a 2000-queries-per-month quota and answers 429 once it is spent
-# (there is no overage on it); the paid plans are billed separately. It is listed
-# here because the accounting tracks metered external calls, not invoices.
+# trafilatura, crawl4ai) and keyless ones (duckduckgo) are never counted as
+# paid. jina is metered when an API key is configured, so it is classified as
+# paid. brave is metered too: the free plan grants a 2000-queries-per-month quota
+# and answers 429 once it is spent (there is no overage on it); the paid plans
+# are billed separately. It is listed here because the accounting tracks metered
+# external calls, not invoices.
 PAID_TYPES: frozenset[str] = frozenset(
     {
         "brave",

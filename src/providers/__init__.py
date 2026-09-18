@@ -12,6 +12,7 @@ from src.providers import (  # noqa: F401  (imported for their @register side ef
     brave,
     brightdata,
     crawl4ai,
+    duckduckgo,
     exa,
     firecrawl,
     firecrawl_search,

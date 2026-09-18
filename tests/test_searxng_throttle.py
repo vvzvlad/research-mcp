@@ -27,7 +27,7 @@ from src.pipeline import Pipeline
 from src.providers import searxng as searxng_module
 from src.providers.base import ProviderError
 from src.providers.searxng import _MIN_INTERVAL_SECONDS, SearxngSearch
-from tests.conftest import _clear_provider_env
+from tests.conftest import _clear_provider_env, _mock_duckduckgo_rate_limited
 
 SEARXNG_URL = "http://searxng.test"
 SEARXNG_PAYLOAD = {"results": [{"url": "https://sx.test/1", "title": "Sx", "content": "a"}]}
@@ -187,6 +187,8 @@ async def test_throttled_searxng_does_not_break_the_search(
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", SEARXNG_URL)
     monkeypatch.setenv("EXA_API_KEY", "k")
+    # duckduckgo is always on; block it out so this stays a searxng/exa test.
+    _mock_duckduckgo_rate_limited()
     searxng_route = respx.get(f"{SEARXNG_URL}/search").mock(
         return_value=httpx.Response(200, json=SEARXNG_PAYLOAD)
     )
@@ -212,4 +214,4 @@ async def test_throttled_searxng_does_not_break_the_search(
     # Excluded from providers=[...] — the skip is recorded as a failure, never
     # silently counted as an instance that took part.
     assert "providers=['exa']" in lines[1]
-    assert "failed=['searxng']" in lines[1]
+    assert "failed=['searxng', 'duckduckgo']" in lines[1]
