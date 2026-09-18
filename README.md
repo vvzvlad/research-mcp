@@ -15,7 +15,7 @@ file under `data/` (kept on a volume).
 |------|--------------|
 | `web_search(query, num_results=8, page=1, language=None)` | Search across all enabled providers, merge + dedup → ranked list (title, URL, snippet). Search only. |
 | `read_page(url)` | One page or PDF → clean Markdown. Auto-detects type, walks the read pipeline (light → heavy) until one succeeds. |
-| `read_pages(urls)` | Up to 20 urls concurrently → list of `{url, ok, markdown\|error}`. |
+| `read_pages(urls)` | Up to 20 urls concurrently → `{summary, pages}`, where each page is `{url, ok, markdown}` or `{url, ok, error, reason}`. |
 
 ## Architecture: types + instances
 

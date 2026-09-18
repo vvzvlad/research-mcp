@@ -12,7 +12,7 @@ import pytest
 import respx
 
 from src.formatting import format_search_results
-from src.pipeline import Pipeline
+from src.pipeline import Pipeline, ReadFailed
 from src.providers.base import ProviderError
 from src.providers.trafilatura import extract_markdown
 from src.rerank import RERANK_ENDPOINT
@@ -314,6 +314,10 @@ async def test_search_log_reports_empty_and_failed_instances(monkeypatch, settin
     assert "empty=['serper']" in line
     assert "failed=['exa']" in line
     assert "results=1" in line
+    # The wiring the model actually depends on: a real provider failure (exa
+    # answers 429 here) is classified and lands aligned with `failed`.
+    assert outcome.failed_reasons == ["rate-limit"]
+    assert "reasons=['rate-limit']" in line
 
 
 # -- post-merge rerank ------------------------------------------------------
@@ -496,7 +500,7 @@ async def test_read_html_uses_single_get(monkeypatch, settings):
     route = respx.get(url).mock(return_value=httpx.Response(200, text=ARTICLE_HTML))
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
     assert "main article body" in out
@@ -522,7 +526,7 @@ async def test_read_recreates_client_after_aclose(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)  # no injected client → pipeline creates it
 
-    first = await pipe.read(url)
+    first = (await pipe.read(url)).markdown
     assert "main article body" in first
 
     # Simulate the premature lifespan shutdown that closed the shared client.
@@ -530,7 +534,7 @@ async def test_read_recreates_client_after_aclose(monkeypatch, settings):
 
     # Same call again must succeed via a recreated client, not raise the
     # "client has been closed" error.
-    second = await pipe.read(url)
+    second = (await pipe.read(url)).markdown
     assert "main article body" in second
 
     await pipe.aclose()
@@ -558,10 +562,63 @@ async def test_read_fallback_trafilatura_thin_jina_error_crawl4ai_ok(monkeypatch
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        outcome = await pipe.read(url)
     finally:
         await pipe.aclose()
-    assert "Crawl4AI result" in out
+    assert "Crawl4AI result" in outcome.markdown
+    # The telemetry the status line is built from: who won, what was walked to
+    # get there, and why each earlier instance did not deliver.
+    assert outcome.provider == "crawl4ai"
+    assert outcome.tried == ["trafilatura", "jina", "crawl4ai"]
+    assert outcome.failures == [("trafilatura", "empty"), ("jina", "other")]
+    assert outcome.thin is False
+    assert outcome.elapsed_ms >= 0
+
+
+@respx.mock
+async def test_read_all_fail_raises_read_failed_with_reasons(monkeypatch, settings):
+    # A dead url: every instance fails, and the raised error carries the chain
+    # and the categorized reasons (read_pages turns them into a per-url reason).
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+
+    url = "https://dead.test/x"
+    respx.get(url).mock(side_effect=httpx.ConnectError("Name or service not known"))
+    respx.get(f"https://r.jina.ai/{url}").mock(
+        side_effect=httpx.ConnectError("Name or service not known")
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ReadFailed) as caught:
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert isinstance(caught.value, ProviderError)  # old callers keep working
+    assert "Не удалось прочитать страницу" in str(caught.value)
+    assert caught.value.tried == ["trafilatura", "jina"]
+    assert [reason for _, reason in caught.value.failures] == ["dns", "dns"]
+
+
+@respx.mock
+async def test_read_pdf_outcome_names_the_pdf_path(monkeypatch, settings):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    url = "https://files.test/doc.pdf"
+    respx.get(url).mock(
+        return_value=httpx.Response(
+            200, content=SAMPLE_PDF, headers={"Content-Type": "application/pdf"}
+        )
+    )
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    # The probe extracted it: no provider instance was entered at all.
+    assert outcome.provider == "pdf"
+    assert outcome.tried == []
 
 
 @respx.mock
@@ -587,7 +644,7 @@ async def test_read_tavily_1_429_fails_over_to_tavily_2(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
     assert "Tavily-2 extracted content" in out
@@ -630,7 +687,7 @@ async def test_read_pdf_probe_403_falls_through_to_provider(monkeypatch, setting
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)  # must NOT raise ProviderError
+        out = (await pipe.read(url)).markdown  # must NOT raise ProviderError
     finally:
         await pipe.aclose()
     assert "PDF via jina" in out
@@ -660,7 +717,7 @@ async def test_read_pdf_200_nonpdf_body_falls_through_to_provider(monkeypatch, s
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)  # must NOT raise ProviderError
+        out = (await pipe.read(url)).markdown  # must NOT raise ProviderError
     finally:
         await pipe.aclose()
     assert "PDF via jina" in out
@@ -704,6 +761,10 @@ async def test_read_pdf_200_nonpdf_body_no_provider_raises_normal_failure(
     assert "tried=[" in line
     assert "tried=[]" not in line
     assert "pdf probe failed" not in line
+    # Flat categories, the same shape as the search line's reasons= — log greps
+    # aggregate both, so the form must not drift back to (name, reason) pairs.
+    assert "reasons=['" in line
+    assert "reasons=[(" not in line
 
 
 # -- PDF detection ---------------------------------------------------------
@@ -721,7 +782,7 @@ async def test_read_pdf_by_suffix(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
     assert "Hello PDF research-mcp" in out
@@ -740,7 +801,7 @@ async def test_read_pdf_by_magic_bytes(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
     assert "Hello PDF research-mcp" in out
@@ -769,7 +830,7 @@ async def test_read_tls_verify_error_retries_insecure(monkeypatch, settings, cap
 
     pipe = Pipeline.build(settings)
     try:
-        out = await pipe.read(url)
+        out = (await pipe.read(url)).markdown
     finally:
         await pipe.aclose()
     assert "Hello PDF research-mcp" in out

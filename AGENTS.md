@@ -36,6 +36,14 @@ a volume across restarts/image updates).
   (jina-reranker-v3.5; enabled by `JINA_API_KEY` + `SEARCH_RERANK_ENABLED`,
   falls back to the merge order on any failure).
 - `src/settings.py` — non-secret knobs only (all defaulted), incl. log file config.
+- `src/formatting.py` — pure renderers of the LLM-facing texts: the results list
+  and the one-line status line a tool answer carries (who answered, what was
+  dropped, what broke and why, elapsed) — on results, on an empty result and on
+  a failed read alike; only a url rejected by the SSRF guard has none.
+- `src/failure_reason.py` — pure `classify(exc)` → one failure category
+  (`timeout`/`rate-limit`/`no-credits`/`access-denied`/`bot-protection`/`tls`/
+  `dns`/`network`/`empty`/`other`); the pipeline tags every provider failure with
+  one and `formatting` renders its Russian label.
 - `src/server.py` — `build_server()` with the 3 `@mcp.tool` definitions.
 - `main.py` — thin entry point: stderr + persistent file sink, build server, run streamable-http.
 - `data/` — runtime state (persistent log file; gitignored, mounted as a volume).
@@ -47,7 +55,8 @@ a volume across restarts/image updates).
 - `pipeline.search` / `pipeline.read` emit one per-request line each (tool,
   target url/query, winning provider/tier or `pdf`, count, latency, ok); the
   search line also names the instances that came back `empty=` and those that
-  `failed=`; `read_pages` adds a `count/ok` summary. Never log bodies or secrets
+  `failed=`, with their `reasons=` categories (the failed read line carries them
+  too); `read_pages` adds a `count/ok` summary. Never log bodies or secrets
   (proxy URLs and keys are never logged).
 
 ## Proxy (per instance)

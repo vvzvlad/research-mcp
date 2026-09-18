@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from src.pipeline import SearchOutcome
-from src.providers.base import ProviderError, SearchResult
+from src.pipeline import ReadFailed, ReadOutcome, SearchOutcome
+from src.providers.base import SearchResult
 from src.server import build_server
 
 
@@ -24,19 +24,37 @@ class FakePipeline:
         hit = SearchResult(title="Hit", url="https://x.test", snippet="snip", source="searxng")
         return SearchOutcome(
             results=[hit],
-            attempted=["searxng"],
+            attempted=["searxng", "serper"],
             answered=["searxng"],
             empty=[],
-            failed=[],
+            failed=["serper"],
+            failed_reasons=["timeout"],
             hits_before_dedup=1,
             reranked=False,
-            elapsed_ms=3,
+            elapsed_ms=3000,
         )
 
     async def read(self, url):
         if "boom" in url:
-            raise ProviderError("страница недоступна всеми способами (тест)")
-        return f"# Markdown of {url}"
+            # Two of the three failures are bot protection → that is the reason
+            # the batch and the per-url entry must report.
+            raise ReadFailed(
+                "страница недоступна всеми способами (тест)",
+                tried=["trafilatura", "jina", "crawl4ai"],
+                failures=[
+                    ("trafilatura", "network"),
+                    ("jina", "bot-protection"),
+                    ("crawl4ai", "bot-protection"),
+                ],
+            )
+        return ReadOutcome(
+            markdown=f"# Markdown of {url}",
+            provider="jina",
+            tried=["trafilatura", "jina"],
+            failures=[("trafilatura", "empty")],
+            thin=False,
+            elapsed_ms=1500,
+        )
 
 
 @pytest.fixture
@@ -59,7 +77,9 @@ async def test_descriptions_are_verbatim_russian(server):
     assert "OCR нет" in rp
     rps = by_name["read_pages"].description
     assert rps.startswith("Скачать НЕСКОЛЬКО страниц или PDF за один вызов (до 20)")
-    assert "{url, ok, markdown|error}" in rps
+    # Only the sentence describing the return shape changed with the summary.
+    assert "{url, ok, markdown|error, reason}" in rps
+    assert "summary — строка состояния по батчу" in rps
 
 
 async def _call(server, name: str, args: dict[str, Any]):
@@ -80,10 +100,39 @@ def _as_list(structured: Any) -> list:
     return structured
 
 
+def _text(structured: Any) -> str:
+    """The plain string a string-returning tool produced (FastMCP wraps it)."""
+    if isinstance(structured, dict) and "result" in structured:
+        return structured["result"]
+    return str(structured)
+
+
+def _pages(structured: Any) -> list:
+    """The ``pages`` list out of read_pages' ``{summary, pages}`` answer."""
+    if isinstance(structured, dict) and "result" in structured:
+        structured = structured["result"]
+    assert isinstance(structured, dict)
+    return _as_list(structured["pages"])
+
+
+def _summary(structured: Any) -> str:
+    if isinstance(structured, dict) and "result" in structured:
+        structured = structured["result"]
+    return structured["summary"]
+
+
 async def test_web_search_formats_results(server):
     out = str(await _call(server, "web_search", {"query": "hello"}))
     assert "Hit" in out
     assert "https://x.test" in out
+
+
+async def test_web_search_appends_the_status_line(server):
+    out = str(await _call(server, "web_search", {"query": "hello"}))
+    assert (
+        "Статус поиска: ответили 1 из 2 (searxng); хитов 1 → результатов 1; "
+        "пусто: 0; ошибок: 1 (таймаут); 3.0 с"
+    ) in out
 
 
 async def test_read_page_returns_markdown(server):
@@ -91,9 +140,29 @@ async def test_read_page_returns_markdown(server):
     assert "Markdown of https://a.test" in out
 
 
+async def test_read_page_appends_the_status_line_after_a_separator(server):
+    # The winning provider and the number of providers tried must reach the
+    # model, visually separated from the page text.
+    out = _text(await _call(server, "read_page", {"url": "https://a.test"}))
+    assert out == (
+        "# Markdown of https://a.test\n\n---\n"
+        "Статус чтения: jina (провайдеров испробовано: 2); 1.5 с"
+    )
+
+
 async def test_read_page_error_is_string(server):
     out = str(await _call(server, "read_page", {"url": "https://boom.test"}))
     assert "недоступна" in out
+
+
+async def test_read_page_failure_carries_the_reason_category(server):
+    # A failed read must not degrade to the raw aggregated exception text: the
+    # category is what tells the model whether another attempt could ever help.
+    out = _text(await _call(server, "read_page", {"url": "https://boom.test"}))
+    assert out == (
+        "страница недоступна всеми способами (тест)\n\n---\n"
+        "Статус чтения: не прочитано (бот-защита); провайдеров испробовано: 3"
+    )
 
 
 async def test_read_pages_batch_mixed(server):
@@ -108,6 +177,21 @@ async def test_read_pages_batch_mixed(server):
     assert "недоступна" in text
 
 
+async def test_read_pages_summary_and_per_page_reason(server):
+    out = await _call(
+        server, "read_pages", {"urls": ["https://a.test", "https://boom.test"]}
+    )
+    assert _summary(out) == "Статус чтения: прочитано 1 из 2; ошибок: 1 (бот-защита)"
+    pages = _pages(out)
+    good = next(p for p in pages if p["url"] == "https://a.test")
+    bad = next(p for p in pages if p["url"] == "https://boom.test")
+    assert good["ok"] is True
+    assert "reason" not in good  # a page that opened has nothing to explain
+    assert bad["ok"] is False
+    assert "недоступна" in bad["error"]  # the raw message stays
+    assert bad["reason"] == "бот-защита"  # ...plus the category next to it
+
+
 async def test_read_pages_respects_hard_limit(settings):
     # The cap is a hard constant (READ_PAGES_MAX=20), NOT a setting, so the
     # tool's "up to 20" promise stays true regardless of env overrides.
@@ -117,7 +201,7 @@ async def test_read_pages_respects_hard_limit(settings):
     srv = build_server(settings, pipeline=FakePipeline())
     urls = [f"https://a.test/{i}" for i in range(READ_PAGES_MAX + 2)]
     out = await _call(srv, "read_pages", {"urls": urls})
-    items = _as_list(out)
+    items = _pages(out)
     assert len(items) == READ_PAGES_MAX
     processed = {item["url"] for item in items}
     assert "https://a.test/0" in processed

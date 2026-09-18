@@ -2,8 +2,11 @@
 
 Tool descriptions are in Russian (LLM-facing); code and comments are in English.
 Each tool wraps the pipeline call in ``try/except`` and returns a clean value (a
-string, or a list of dicts for read_pages) so the LLM always gets a usable
-result instead of a traceback.
+string, or a ``{summary, pages}`` dict for read_pages) so the LLM always gets a
+usable result instead of a traceback. Every answer carries one short status line
+of pipeline telemetry rendered by ``src/formatting.py`` — results, empty results
+and failed reads alike; the only exception is a url the SSRF guard rejected
+before any provider ran, where there is no pipeline run to report.
 
 Transport: streamable-http on ``mcp_host:mcp_port`` (endpoint ``/mcp``). The
 server itself does NO auth — Traefik + basicAuth in front of it handles that.
@@ -19,8 +22,16 @@ from typing import Any
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
 
-from src.formatting import format_search_results
-from src.pipeline import Pipeline
+from src.failure_reason import classify, dominant_reason
+from src.formatting import (
+    format_batch_status,
+    format_read_failure_status,
+    format_read_status,
+    format_search_results,
+    format_search_status,
+    reason_label,
+)
+from src.pipeline import Pipeline, ReadFailed
 from src.providers.base import ProviderError
 from src.settings import Settings
 
@@ -29,6 +40,18 @@ from src.settings import Settings
 # contract honest regardless of environment overrides.
 SEARCH_RESULTS_MAX = 50
 READ_PAGES_MAX = 20
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """The one failure category to report for a url that did not open.
+
+    A ``ReadFailed`` already carries a classified reason per provider, so the
+    dominant one speaks for the whole chain; anything else (the SSRF guard, an
+    unexpected crash) is classified on the spot.
+    """
+    if isinstance(exc, ReadFailed):
+        return dominant_reason(exc.failures)
+    return classify(exc)
 
 
 def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMCP:
@@ -84,7 +107,11 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
             outcome = await pipeline.search(query, count, page, language)
         except ProviderError as exc:
             return str(exc)
-        return format_search_results(outcome, query=query, page=page)
+        body = format_search_results(outcome, query=query, page=page)
+        # The status line rides under every answer, including the "nothing
+        # found" / "search is broken" texts — that is exactly when the model
+        # needs to know how many instances were behind the verdict.
+        return f"{body}\n\n{format_search_status(outcome)}"
 
     @mcp.tool(
         name="read_page",
@@ -104,9 +131,19 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
     )
     async def read_page(url: str) -> str:
         try:
-            return await pipeline.read(url)
+            outcome = await pipeline.read(url)
+        except ReadFailed as exc:
+            # A failed read carries telemetry too: the category says whether
+            # another attempt could ever help. Same shape as a failed url in a
+            # read_pages batch.
+            status = format_read_failure_status(_failure_reason(exc), len(exc.tried))
+            return f"{exc}\n\n---\n{status}"
         except ProviderError as exc:
+            # Raised before any provider ran (the SSRF guard) — nothing to report.
             return str(exc)
+        # Behind a horizontal rule: the status line is about the page, not part
+        # of it, and must not read as page text.
+        return f"{outcome.markdown}\n\n---\n{format_read_status(outcome)}"
 
     @mcp.tool(
         name="read_pages",
@@ -117,30 +154,42 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
             "нужно прочитать пачку url.\n\n"
             "Параметр:\n"
             "- urls: список http(s)-адресов (до 20).\n\n"
-            "Возвращает список объектов {url, ok, markdown|error}: ok=false с текстом "
-            "ошибки для тех url, что не открылись всеми способами, остальные — "
-            "с markdown."
+            "Возвращает объект {summary, pages}: summary — строка состояния по батчу, "
+            "pages — список объектов {url, ok, markdown|error, reason}: ok=false с "
+            "текстом ошибки и категорией причины для тех url, что не открылись всеми "
+            "способами, остальные — с markdown."
         ),
     )
-    async def read_pages(urls: list[str]) -> list[dict[str, Any]]:
+    async def read_pages(urls: list[str]) -> dict[str, Any]:
         capped = urls[:READ_PAGES_MAX]
         semaphore = asyncio.Semaphore(settings.read_pages_concurrency)
 
-        async def _one(url: str) -> dict[str, Any]:
+        async def _one(url: str) -> tuple[dict[str, Any], str | None]:
+            # Returns (entry, reason) — the reason constant is None for a url
+            # that opened, and feeds the batch summary for one that did not.
             async with semaphore:
                 try:
-                    markdown = await pipeline.read(url)
-                    return {"url": url, "ok": True, "markdown": markdown}
+                    outcome = await pipeline.read(url)
+                    return {"url": url, "ok": True, "markdown": outcome.markdown}, None
                 except ProviderError as exc:
-                    return {"url": url, "ok": False, "error": str(exc)}
+                    reason = _failure_reason(exc)
+                    entry = {"url": url, "ok": False, "error": str(exc)}
                 except Exception as exc:  # noqa: BLE001 — never break the batch
-                    return {"url": url, "ok": False, "error": f"Непредвиденная ошибка: {exc}"}
+                    reason = _failure_reason(exc)
+                    entry = {"url": url, "ok": False, "error": f"Непредвиденная ошибка: {exc}"}
+                entry["reason"] = reason_label(reason)
+                return entry, reason
 
-        results = await asyncio.gather(*(_one(url) for url in capped))
+        outcomes = await asyncio.gather(*(_one(url) for url in capped))
+        pages = [entry for entry, _ in outcomes]
+        reasons = [reason for _, reason in outcomes if reason is not None]
         # Per-url lines are emitted by pipeline.read; add one batch summary line.
         # (read already logs each url's winning provider/latency individually.)
-        ok_count = sum(1 for r in results if r["ok"])
+        ok_count = sum(1 for page in pages if page["ok"])
         logger.info("read_pages count={} ok={}", len(capped), ok_count)
-        return results
+        return {
+            "summary": format_batch_status(ok_count, len(pages) - ok_count, reasons),
+            "pages": pages,
+        }
 
     return mcp

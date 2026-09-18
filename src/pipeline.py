@@ -17,8 +17,10 @@ broke".
 Read first detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic) and
 extracts them with pypdf. Otherwise it tries the enabled ``READ_PIPELINE``
 instances in order; the first to return content ``>= fallback_min_chars`` wins;
-thin/empty/error → next instance. If all fail, it raises ``ProviderError`` with
-an aggregated message.
+thin/empty/error → next instance. It returns a ``ReadOutcome``: the markdown
+plus the winning provider, the chain that was walked and every failure along the
+way tagged with a ``src.failure_reason`` category. If all fail, it raises
+``ReadFailed`` (a ``ProviderError``) carrying the same telemetry.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from loguru import logger
 
+from src import failure_reason
 from src.config_errors import ConfigError
 from src.pipeline_config import (
     INSTANCES,
@@ -75,9 +78,44 @@ class SearchOutcome:
     answered: list[str]  # returned at least one hit
     empty: list[str]  # returned without error but zero hits
     failed: list[str]  # raised ProviderError or crashed
+    failed_reasons: list[str]  # why, one src.failure_reason per entry of `failed`
     hits_before_dedup: int  # total hits across the answering providers
     reranked: bool
     elapsed_ms: int
+
+
+@dataclass(slots=True)
+class ReadOutcome:
+    """One read request: the markdown plus how the pipeline got hold of it.
+
+    ``provider`` is the instance that won (``"pdf"`` for the PDF path, which no
+    instance serves), ``tried`` is the chain walked up to and including it, and
+    ``failures`` pairs every instance that did not deliver with its
+    ``src.failure_reason`` category. ``thin`` marks the last-resort branch: every
+    instance came back under ``fallback_min_chars`` and the longest of those
+    scraps is what is being returned.
+    """
+
+    markdown: str
+    provider: str
+    tried: list[str]
+    failures: list[tuple[str, str]]  # (instance, reason constant)
+    thin: bool
+    elapsed_ms: int
+
+
+class ReadFailed(ProviderError):
+    """Every read method failed. Carries the telemetry of the failed attempt.
+
+    A plain ``ProviderError`` by inheritance — callers that only want the message
+    keep working — with ``tried`` / ``failures`` attached for the ones that want
+    to tell the model *why* nothing opened.
+    """
+
+    def __init__(self, message: str, tried: list[str], failures: list[tuple[str, str]]) -> None:
+        super().__init__(message)
+        self.tried = tried
+        self.failures = failures
 
 
 def _is_tls_verify_error(exc: Exception) -> bool:
@@ -408,20 +446,21 @@ class Pipeline:
         num_results = max(1, num_results)
         started = time.monotonic()
 
-        async def _one(provider: SearchProvider) -> tuple[str, list[SearchResult] | None]:
-            # Returns (name, results) where results is None if the provider
-            # failed/crashed (so it is NOT counted as "really worked"). Each
-            # provider uses the client bound to ITS proxy (None = direct).
+        async def _one(provider: SearchProvider) -> tuple[str, list[SearchResult] | None, str]:
+            # Returns (name, results, reason) where results is None if the
+            # provider failed/crashed (so it is NOT counted as "really worked")
+            # and reason is its failure category (empty string when it worked).
+            # Each provider uses the client bound to ITS proxy (None = direct).
             client = self._clients.client_for(provider.proxy)
             try:
                 hits = await provider.search(client, query, num_results, page, language)
-                return provider.name, hits
+                return provider.name, hits, ""
             except ProviderError as exc:
                 logger.info("search '{}' failed: {}", provider.name, exc)
-                return provider.name, None
+                return provider.name, None, failure_reason.classify(exc)
             except Exception as exc:  # noqa: BLE001 — never break the merge
                 logger.warning("search '{}' crashed: {}", provider.name, exc)
-                return provider.name, None
+                return provider.name, None, failure_reason.classify(exc)
 
         attempted = [p.name for p in self._search]
         # Gather in pipeline order; results keep that order so dedup prefers the
@@ -433,12 +472,14 @@ class Pipeline:
         answered: list[str] = []
         empty: list[str] = []
         failed: list[str] = []
+        failed_reasons: list[str] = []
         hits_before_dedup = 0
         merged: list[SearchResult] = []
         seen: set[str] = set()
-        for name, hits in batches:
+        for name, hits, reason in batches:
             if hits is None:
                 failed.append(name)
+                failed_reasons.append(reason or failure_reason.OTHER)
                 continue
             if not hits:
                 empty.append(name)
@@ -489,12 +530,13 @@ class Pipeline:
         paid_calls, pct = self._account(billed)
         # One per-request line for the persistent log (no bodies/secrets).
         logger.info(
-            "search query={!r} providers={} empty={} failed={} results={} reranked={} "
-            "paid_calls={} cum_paid={} cum_calls={} paid_pct={:.1f}% elapsed_ms={}",
+            "search query={!r} providers={} empty={} failed={} reasons={} results={} "
+            "reranked={} paid_calls={} cum_paid={} cum_calls={} paid_pct={:.1f}% elapsed_ms={}",
             query,
             answered,
             empty,
             failed,
+            failed_reasons,
             len(merged),
             "true" if reranked else "false",
             paid_calls,
@@ -509,6 +551,7 @@ class Pipeline:
             answered=answered,
             empty=empty,
             failed=failed,
+            failed_reasons=failed_reasons,
             hits_before_dedup=hits_before_dedup,
             reranked=reranked,
             elapsed_ms=elapsed_ms,
@@ -516,11 +559,11 @@ class Pipeline:
 
     # -- read ---------------------------------------------------------------
 
-    async def read(self, url: str) -> str:
-        """Return clean Markdown for ``url`` (PDF-aware, with provider fallback).
+    async def read(self, url: str) -> ReadOutcome:
+        """Read ``url`` (PDF-aware, with provider fallback) into a ``ReadOutcome``.
 
-        Raises ``ProviderError`` if every method fails, or ``UrlNotAllowed`` (a
-        ``ProviderError``) if the url points into the internal network.
+        Raises ``ReadFailed`` if every method fails, or ``UrlNotAllowed`` (both
+        are ``ProviderError``) if the url points into the internal network.
         """
         # SSRF entry check: a blocked url costs zero HTTP requests and gets a
         # clean error. The guarded clients re-check the same url when the probe
@@ -537,6 +580,10 @@ class Pipeline:
         # content without raising (a billed 200; thin results count too).
         tried: list[str] = []
         billed: list[str] = []
+        # Model-facing telemetry: one (instance, reason) pair per attempt that
+        # did not deliver — the structured twin of the `errors` texts below, so
+        # both lists stay in step.
+        failures: list[tuple[str, str]] = []
 
         def _log_ok(provider_name: str, suffix: str = "") -> None:
             # Fold the billed calls into the cumulative counters and emit the
@@ -566,7 +613,15 @@ class Pipeline:
         pdf_text, probe_html = await self._probe(self._clients.guarded_client_for(None), url)
         if pdf_text is not None:
             _log_ok("pdf")
-            return pdf_text
+            # tried stays empty: the probe is not a provider call.
+            return ReadOutcome(
+                markdown=pdf_text,
+                provider="pdf",
+                tried=list(tried),
+                failures=list(failures),
+                thin=False,
+                elapsed_ms=_ms(),
+            )
 
         # 2) HTML path: walk the read pipeline until one yields enough content.
         errors: list[str] = []
@@ -578,9 +633,11 @@ class Pipeline:
                 content = await self._read_one(provider, url, probe_html)
             except ProviderError as exc:
                 errors.append(str(exc))
+                failures.append((provider.name, failure_reason.classify(exc)))
                 continue
             except Exception as exc:  # noqa: BLE001 — treat as provider failure
                 errors.append(f"{provider.name}: {exc}")
+                failures.append((provider.name, failure_reason.classify(exc)))
                 continue
             # Returned without raising → a billed 200 (even if too thin). One
             # jina success may hide an extra billed upstream call (the
@@ -590,22 +647,41 @@ class Pipeline:
             billed.append(provider.name)
             if len(content) >= self._settings.fallback_min_chars:
                 _log_ok(provider.name)
-                return content
+                return ReadOutcome(
+                    markdown=content,
+                    provider=provider.name,
+                    tried=list(tried),
+                    failures=list(failures),
+                    thin=False,
+                    elapsed_ms=_ms(),
+                )
             # Too thin — remember the longest thin result as a last resort.
             if best_thin is None or len(content) > len(best_thin):
                 best_thin = content
                 best_thin_name = provider.name
             errors.append(f"{provider.name}: content too thin ({len(content)} chars)")
+            failures.append((provider.name, failure_reason.EMPTY))
 
         if best_thin:
             _log_ok(best_thin_name or "", suffix=" (thin fallback)")
-            return best_thin
+            return ReadOutcome(
+                markdown=best_thin,
+                provider=best_thin_name or "",
+                tried=list(tried),
+                failures=list(failures),
+                thin=True,
+                elapsed_ms=_ms(),
+            )
         paid_calls, pct = self._account(billed)
         logger.warning(
-            "read url={} -> FAILED ok=false tried={} paid_calls={} cum_paid={} "
+            "read url={} -> FAILED ok=false tried={} reasons={} paid_calls={} cum_paid={} "
             "cum_calls={} paid_pct={:.1f}% elapsed_ms={} errors={}",
             url,
             tried,
+            # Flat categories, like the search line's reasons= — the instance
+            # names are already in tried=, and a grep over reasons= must see the
+            # same shape in both lines.
+            [reason for _, reason in failures],
             paid_calls,
             self._cum_paid,
             self._cum_calls,
@@ -613,7 +689,11 @@ class Pipeline:
             _ms(),
             "; ".join(errors),
         )
-        raise ProviderError("Не удалось прочитать страницу. " + "; ".join(errors))
+        raise ReadFailed(
+            "Не удалось прочитать страницу. " + "; ".join(errors),
+            tried=list(tried),
+            failures=list(failures),
+        )
 
     async def _read_one(self, provider: ReadProvider, url: str, probe_html: str | None) -> str:
         """Run one read provider, reusing the probe body for trafilatura.
