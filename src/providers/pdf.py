@@ -16,9 +16,14 @@ from src.providers.base import ProviderError
 # A PDF file always starts with this magic marker.
 PDF_MAGIC = b"%PDF"
 
+# Returned when pypdf parses the file but finds no text. Pipeline.read hands
+# this back only as a LAST resort, after the whole read chain has also failed —
+# a chain that includes jina's OCR tier when the url path ends in .pdf AND jina
+# is keyed. Both gates matter, so the wording promises neither that OCR ran nor
+# that it was skipped: depending on deployment and url, either is true.
 NO_TEXT_LAYER_NOTICE = (
     "В PDF нет извлекаемого текстового слоя (вероятно, скан из картинок). "
-    "OCR не выполняется."
+    "Распознать текст не удалось: OCR не дал результата либо недоступен."
 )
 
 

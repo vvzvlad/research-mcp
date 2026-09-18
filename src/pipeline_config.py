@@ -56,6 +56,48 @@ INSTANCES: list[Instance] = [
     # REQUIRED here — no optional_api_key — and the instance simply
     # auto-disables when JINA_API_KEY is unset.
     Instance("jina-search", "jina_search", api_key_env="JINA_API_KEY", proxy_env="JINA_PROXY"),
+    # Tavily and Firecrawl sell search and extract off ONE key, so these two
+    # need no new secret and light up the moment the reader key is present.
+    #
+    # They are NOT free, though: the key has ONE monthly pool, shared by both
+    # products. Measured on our own Tavily key 2026-09-18: plan_usage 12 =
+    # search 4 + extract 8, against plan_limit 1000. Search runs on every
+    # web_search while the tavily/firecrawl READERS sit 4th and 6th in the read
+    # chain and win ~1% of reads (19-27 calls a month), so search will be what
+    # empties the pool — and when it does, those readers start failing too and
+    # drop out of the chain. Firecrawl says so with a 402 (seen in our own logs);
+    # what status Tavily uses is NOT verified — its docs do not publish one, so
+    # do not grep for a specific code there, and note that _CREDIT_MARKERS may
+    # or may not match its wording. That trade is deliberate: the readers we
+    # lose are worth far less than the search we gain, and the chain has five
+    # other readers. But it is a trade, not a free lunch, and it cannot be
+    # turned off per-product — pulling the key disables the reader as well.
+    Instance(
+        "tavily-search", "tavily_search", api_key_env="TAVILY_1_API_KEY", proxy_env="TAVILY_1_PROXY"
+    ),
+    Instance(
+        "firecrawl-search",
+        "firecrawl_search",
+        api_key_env="FIRECRAWL_API_KEY",
+        proxy_env="FIRECRAWL_PROXY",
+    ),
+    # Everything from here down has NO key yet: each stays disabled (one log
+    # line at startup) until its vars are set. XMLRiver needs two — the numeric
+    # account id travels as `user` and the key as `key`, both in the query
+    # string — and defaults to the Yandex index, which is the reason to have it.
+    Instance(
+        "xmlriver",
+        "xmlriver_search",
+        api_key_env="XMLRIVER_API_KEY",
+        token_env="XMLRIVER_USER_ID",
+        proxy_env="XMLRIVER_PROXY",
+    ),
+    Instance(
+        "parallel", "parallel_search", api_key_env="PARALLEL_API_KEY", proxy_env="PARALLEL_PROXY"
+    ),
+    Instance("octen", "octen_search", api_key_env="OCTEN_API_KEY", proxy_env="OCTEN_PROXY"),
+    Instance("linkup", "linkup_search", api_key_env="LINKUP_API_KEY", proxy_env="LINKUP_PROXY"),
+    Instance("youcom", "youcom_search", api_key_env="YOUCOM_API_KEY", proxy_env="YOUCOM_PROXY"),
     Instance("serper", "serper", api_key_env="SERPER_API_KEY", proxy_env="SERPER_PROXY"),
     Instance("exa", "exa", api_key_env="EXA_API_KEY", proxy_env="EXA_PROXY"),
     # --- read ---
@@ -68,17 +110,51 @@ INSTANCES: list[Instance] = [
     Instance("tavily-1", "tavily", api_key_env="TAVILY_1_API_KEY", proxy_env="TAVILY_1_PROXY"),
     Instance("tavily-2", "tavily", api_key_env="TAVILY_2_API_KEY", proxy_env="TAVILY_2_PROXY"),
     Instance("firecrawl", "firecrawl", api_key_env="FIRECRAWL_API_KEY", proxy_env="FIRECRAWL_PROXY"),
+    # Last resort of the read chain: an anti-bot unlocker for the pages every
+    # other provider bounces off (marketplaces, Cloudflare interstitials). Two
+    # vars because the zone is an account-side setting, not a secret.
+    Instance(
+        "brightdata",
+        "brightdata",
+        api_key_env="BRIGHTDATA_API_KEY",
+        token_env="BRIGHTDATA_ZONE",
+        proxy_env="BRIGHTDATA_PROXY",
+    ),
 ]
 
 # Order in which enabled instances are tried. Search runs them concurrently and
 # merges; read tries them sequentially until one returns enough content.
-# brave sits right after searxng: dedup keeps the hit from the EARLIER provider,
-# and brave has its own index and the best result quality of our paid options.
-# The order past brave is the dedup preference by cost: the free/quota providers
-# (searxng, brave) first, then jina-search at a fixed ~$0.0005/query, then
-# serper (its key is dead but the instance is kept wired), then exa — the most
-# expensive of the lot.
-SEARCH_PIPELINE: list[str] = ["searxng", "brave", "jina-search", "serper", "exa"]
+#
+# This list is a DEDUP PREFERENCE, not a cost gate: search fires every enabled
+# instance on every query and merges, so the order decides only which copy of a
+# duplicate url survives (the earlier one) and which instance gets named as its
+# source. Cost scales with how many instances are ENABLED, not with position —
+# so enabling all of them means paying all of them on every single query.
+#
+# Order: proven and free first (searxng self-hosted, brave's 2000/month), then
+# tavily-search and firecrawl-search — no new secret, but NOT free: they spend
+# the same monthly pool as their own readers, see the instance comment above.
+# Then the proven paid workhorse jina-search at ~$0.0005/query, then the vendors
+# we have no key for yet, cheapest first (xmlriver ~$0.0003 on the Yandex index,
+# parallel and octen at $1/1k, linkup and youcom at $5/1k), then serper, then
+# exa at $7/1k.
+SEARCH_PIPELINE: list[str] = [
+    "searxng",
+    "brave",
+    "tavily-search",
+    "firecrawl-search",
+    "jina-search",
+    "xmlriver",
+    "parallel",
+    "octen",
+    "linkup",
+    "youcom",
+    "serper",
+    "exa",
+]
+# Read is sequential and stops at the first sufficient answer, so here the order
+# IS a cost gate: brightdata sits last because it is the only one that bills for
+# pages the cheap providers already handle.
 READ_PIPELINE: list[str] = [
     "trafilatura",
     "jina",
@@ -86,6 +162,7 @@ READ_PIPELINE: list[str] = [
     "tavily-1",
     "tavily-2",
     "firecrawl",
+    "brightdata",
 ]
 
 # Provider TYPES that bill per successful request (external metered APIs). Used
@@ -96,5 +173,21 @@ READ_PIPELINE: list[str] = [
 # (there is no overage on it); the paid plans are billed separately. It is listed
 # here because the accounting tracks metered external calls, not invoices.
 PAID_TYPES: frozenset[str] = frozenset(
-    {"brave", "serper", "exa", "jina", "jina_search", "tavily", "firecrawl"}
+    {
+        "brave",
+        "serper",
+        "exa",
+        "jina",
+        "jina_search",
+        "tavily",
+        "firecrawl",
+        "tavily_search",
+        "firecrawl_search",
+        "xmlriver_search",
+        "parallel_search",
+        "octen_search",
+        "linkup_search",
+        "youcom_search",
+        "brightdata",
+    }
 )

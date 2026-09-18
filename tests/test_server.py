@@ -151,7 +151,14 @@ async def test_descriptions_are_verbatim_russian(server):
     assert "Это ТОЛЬКО поиск, он НЕ читает страницы." in ws
     rp = by_name["read_page"].description
     assert rp.startswith("Скачать ОДНУ веб-страницу или PDF по url")
-    assert "OCR нет" in rp
+    # The description must not promise that scans come back empty or that no OCR
+    # happens: since the scan fall-through, a .pdf url on a keyed deployment does
+    # buy the jina OCR tier, and a scan never returns "" — it returns either text
+    # or NO_TEXT_LAYER_NOTICE.
+    assert "OCR нет" not in rp
+    assert "вернут пусто" not in rp
+    assert "распознавание" in rp
+    # And the cross-reference was APPENDED here too — the old sentence stays.
     assert "Для нескольких url за один вызов — read_pages." in rp
     rps = by_name["read_pages"].description
     assert rps.startswith("Скачать НЕСКОЛЬКО страниц или PDF за один вызов (до 20)")

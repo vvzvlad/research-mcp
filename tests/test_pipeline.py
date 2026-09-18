@@ -14,6 +14,7 @@ import respx
 from src.formatting import format_search_results
 from src.pipeline import Pipeline, ReadFailed
 from src.providers.base import ProviderError
+from src.providers.pdf import NO_TEXT_LAYER_NOTICE
 from src.providers.trafilatura import extract_markdown
 from src.rerank import RERANK_ENDPOINT
 from src.settings import Settings
@@ -1200,3 +1201,61 @@ def test_extract_markdown_uses_precision(monkeypatch):
     assert captured_kwargs.get("favor_recall") is not True
     assert captured_kwargs.get("output_format") == "markdown"
     assert captured_kwargs.get("include_comments") is False
+
+
+@respx.mock
+async def test_scanned_pdf_falls_through_to_the_read_chain(monkeypatch, settings):
+    # A PDF with no text layer is a scan. pypdf parses it but has no text to
+    # give, and this branch used to return that notice as a SUCCESS — so a scan
+    # never entered the read chain and never reached jina's OCR tier, which
+    # exists for exactly this case. It must fall through instead.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+
+    # Patch the extractor the pipeline imported by name: a real text-free PDF
+    # fixture would pin pypdf's behaviour, not ours.
+    monkeypatch.setattr("src.pipeline.extract_pdf_text", lambda _data: NO_TEXT_LAYER_NOTICE)
+
+    url = "https://files.test/scan.pdf"
+    respx.get(url).mock(return_value=httpx.Response(200, content=SAMPLE_PDF))
+    jina_md = "# Scanned page, read by jina\n\n" + ("Recognised body text. " * 50)
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(200, text=jina_md))
+
+    pipe = Pipeline.build(settings)
+    try:
+        out = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert "Scanned page, read by jina" in out.markdown
+    assert out.markdown != NO_TEXT_LAYER_NOTICE
+    assert out.provider == "jina"  # the OCR tier won, not the probe
+
+
+@respx.mock
+async def test_scanned_pdf_keeps_the_notice_when_the_chain_finds_nothing(
+    monkeypatch, settings, capture_logs
+):
+    # The fall-through must not lose the old answer: when no reader can do
+    # better either, the caller still gets pypdf's notice rather than a failure.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setattr("src.pipeline.extract_pdf_text", lambda _data: NO_TEXT_LAYER_NOTICE)
+
+    url = "https://files.test/scan.pdf"
+    respx.get(url).mock(return_value=httpx.Response(200, content=SAMPLE_PDF))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(500))
+
+    pipe = Pipeline.build(settings)
+    try:
+        out = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert out.markdown == NO_TEXT_LAYER_NOTICE
+    # The notice came from the probe, so "pdf" is the winner, while `tried`
+    # carries the chain that was spent trying to OCR it.
+    assert out.provider == "pdf"
+    assert out.tried
+    # Reported as a success, the way it was before the fall-through existed.
+    assert any("ok=true" in line and "no text layer" in line for line in capture_logs)
