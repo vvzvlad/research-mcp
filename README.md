@@ -82,7 +82,9 @@ are read by **name** in the instance loader, not declared as Settings fields. Th
 non-secret knobs (all defaulted): `MCP_HOST`, `MCP_PORT`, `LOG_LEVEL`,
 `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `REQUEST_TIMEOUT`,
 `FALLBACK_MIN_CHARS`, `READ_PAGES_CONCURRENCY`, `RETRIES`,
-`SEARCH_RERANK_ENABLED`, `JINA_TOKEN_BUDGET`. The `read_pages`
+`SEARCH_RERANK_ENABLED`, `JINA_TOKEN_BUDGET`, `ALLOW_PRIVATE_NETWORK` (escape
+hatch for the SSRF guard: `true` lets `read_page` fetch private/loopback
+addresses, which are blocked by default). The `read_pages`
 per-call url cap is a fixed `20` (hard constant, matching the tool description) —
 not configurable.
 

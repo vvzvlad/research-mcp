@@ -21,6 +21,7 @@ an aggregated message.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import os
 import ssl
 import time
@@ -38,6 +39,7 @@ from src.pipeline_config import (
     Instance,
 )
 import src.providers  # noqa: F401  (import the package for its @register side effects)
+from src.providers._url_guard import ensure_url_allowed
 from src.providers.base import (
     BROWSER_USER_AGENT,
     ProviderConfig,
@@ -113,19 +115,29 @@ class ClientManager:
     one was closed (e.g. a premature lifespan shutdown), so the facade never
     serves "client has been closed" across sessions/requests. Reusing one client
     per proxy keeps connection pools warm instead of spawning a client per call.
+
+    There are TWO caches: plain clients (``client_for``) and SSRF-guarded ones
+    (``guarded_client_for``), whose request event hook checks every outgoing url
+    — the initial one and every redirect hop. Plain clients stay unguarded on
+    purpose: searxng/crawl4ai are internal services on private addresses.
     """
 
     def __init__(
         self,
         request_timeout: float,
         direct_client: httpx.AsyncClient | None = None,
+        allow_private: bool = False,
     ) -> None:
         self._request_timeout = request_timeout
+        self._allow_private = allow_private
         # The direct (None-proxy) client may be injected (tests pass one so respx
         # can intercept it); proxied clients are always created on demand.
         self._clients: dict[str | None, httpx.AsyncClient] = {}
         if direct_client is not None:
             self._clients[None] = direct_client
+        # Guarded clients are NEVER injected: an injected client carries no event
+        # hook, so it could not enforce the guard.
+        self._guarded_clients: dict[str | None, httpx.AsyncClient] = {}
 
     def client_for(self, proxy: str | None) -> httpx.AsyncClient:
         """Return the client bound to ``proxy`` (None = direct), creating it lazily.
@@ -144,12 +156,46 @@ class ClientManager:
             self._clients[proxy] = client
         return client
 
+    async def _guard_request(self, request: httpx.Request) -> None:
+        """httpx request hook: block a url that points into the internal network.
+
+        httpx runs it for the initial request AND for every redirect hop, which
+        is what closes the "public url redirects to 127.0.0.1" hole.
+        """
+        await ensure_url_allowed(str(request.url), allow_private=self._allow_private)
+
+    def guard_event_hooks(self) -> dict[str, list[Callable[[httpx.Request], Awaitable[None]]]]:
+        """The ``event_hooks`` dict that makes an httpx client SSRF-guarded.
+
+        Exposed so a client created outside this manager (the throwaway insecure
+        retry client in the probe) carries the same hook.
+        """
+        return {"request": [self._guard_request]}
+
+    def guarded_client_for(self, proxy: str | None) -> httpx.AsyncClient:
+        """Like ``client_for``, but every request (and redirect) is SSRF-checked.
+
+        Used for the urls WE fetch on the model's behalf. Always created here —
+        an injected client is never reused as a guarded one.
+        """
+        client = self._guarded_clients.get(proxy)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
+                timeout=self._request_timeout,
+                follow_redirects=True,
+                proxy=proxy,
+                event_hooks=self.guard_event_hooks(),
+            )
+            self._guarded_clients[proxy] = client
+        return client
+
     async def aclose(self) -> None:
-        """Close every open client."""
-        for client in self._clients.values():
-            if not client.is_closed:
-                await client.aclose()
-        self._clients.clear()
+        """Close every open client (both caches)."""
+        for cache in (self._clients, self._guarded_clients):
+            for client in cache.values():
+                if not client.is_closed:
+                    await client.aclose()
+            cache.clear()
 
 
 class Pipeline:
@@ -184,7 +230,11 @@ class Pipeline:
         # later closed by) the wrong loop/lifespan. The manager creates them
         # lazily inside the running loop. An injected client (tests) becomes the
         # direct, no-proxy client so respx can intercept it.
-        self._clients = ClientManager(settings.request_timeout, direct_client=client)
+        self._clients = ClientManager(
+            settings.request_timeout,
+            direct_client=client,
+            allow_private=settings.allow_private_network,
+        )
 
     # -- construction -------------------------------------------------------
 
@@ -413,8 +463,14 @@ class Pipeline:
     async def read(self, url: str) -> str:
         """Return clean Markdown for ``url`` (PDF-aware, with provider fallback).
 
-        Raises ``ProviderError`` if every method fails.
+        Raises ``ProviderError`` if every method fails, or ``UrlNotAllowed`` (a
+        ``ProviderError``) if the url points into the internal network.
         """
+        # SSRF entry check: a blocked url costs zero HTTP requests and gets a
+        # clean error. The guarded clients re-check the same url when the probe
+        # goes out — deliberate: this check is for the early error, the hook is
+        # for every hop (redirects included).
+        await ensure_url_allowed(url, allow_private=self._settings.allow_private_network)
         started = time.monotonic()
 
         def _ms() -> int:
@@ -451,7 +507,7 @@ class Pipeline:
         #    The probe is NOT a provider call, so it is never billed.
         # The probe never hard-fails: a fetch error or an unparseable "PDF"
         # defers to the read chain below (jina/tavily/firecrawl fetch server-side).
-        pdf_text, probe_html = await self._probe(self._clients.client_for(None), url)
+        pdf_text, probe_html = await self._probe(self._clients.guarded_client_for(None), url)
         if pdf_text is not None:
             _log_ok("pdf")
             return pdf_text
@@ -516,6 +572,12 @@ class Pipeline:
             if not content:
                 raise ProviderError(f"{provider.name}: no main content extracted")
             return content
+        if isinstance(provider, TrafilaturaRead):
+            # trafilatura is the only read provider that fetches the target url
+            # from OUR process, so it is the only one that needs the SSRF-guarded
+            # client. Every other read provider POSTs the url to its own API and
+            # never fetches it from here.
+            return await provider.read(self._clients.guarded_client_for(provider.proxy), url)
         return await provider.read(self._clients.client_for(provider.proxy), url)
 
     async def _probe(self, client: httpx.AsyncClient, url: str) -> tuple[str | None, str | None]:
@@ -576,6 +638,9 @@ class Pipeline:
                 verify=False,
                 timeout=self._settings.request_timeout,
                 follow_redirects=True,
+                # Same SSRF hook as the guarded clients: dropping verification
+                # must not also drop the address check.
+                event_hooks=self._clients.guard_event_hooks(),
             ) as insecure:
                 response = await insecure.get(url, headers={"User-Agent": BROWSER_USER_AGENT})
                 response.raise_for_status()

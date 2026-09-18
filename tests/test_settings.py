@@ -13,6 +13,7 @@ def test_defaults_present():
     assert s.retries == 1
     assert s.search_rerank_enabled is True
     assert s.jina_token_budget == 100_000
+    assert s.allow_private_network is False
 
 
 def test_read_pages_max_is_not_a_setting():
