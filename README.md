@@ -49,7 +49,11 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
 
 Cross-cutting: one transient retry (5xx / transport errors) with a short backoff;
 **402 (out of credits) / 429 (rate limited) are treated as a provider failure →
-next instance** (this is what makes `tavily-1 → tavily-2` fail over).
+next instance** (this is what makes `tavily-1 → tavily-2` fail over). Vendors
+that report an empty balance with some other 4xx — serper answers `400 {"message":
+"Not enough credits"}`, octen `403 "Insufficient balance"` — are recognised by
+the body and logged as `out of credits` too, so an unpaid account never reads as
+a broken API.
 
 An instance is **enabled** only if its required env var(s) are set; otherwise it
 is skipped with a log line. `trafilatura` needs no config (always on); `jina`
