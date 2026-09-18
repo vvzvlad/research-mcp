@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # pathological mega-page cannot eat a chunk of the balance. 0 disables the
     # header entirely.
     jina_token_budget: int = 100_000
+    # Escape hatch for the SSRF guard (src/providers/_url_guard.py): when true,
+    # read_page may fetch private/loopback/link-local addresses. Off by default;
+    # turn it on only for a deployment that deliberately reads an internal
+    # resource. The http/https scheme check applies either way.
+    allow_private_network: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
