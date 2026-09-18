@@ -268,12 +268,21 @@ async def test_long_excerpts_are_truncated_to_the_snippet_cap(make_config):
 
 
 @respx.mock
-async def test_short_excerpts_are_left_alone(make_config):
-    # The cap must not touch a normal-sized snippet.
-    respx.post(PARALLEL_SEARCH_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=PARALLEL_PAYLOAD)
-    )
+async def test_a_snippet_exactly_at_the_cap_is_not_touched(make_config):
+    # The boundary, not a short snippet: a snippet of exactly the cap length
+    # must come back whole. (A plain short-snippet test would only repeat what
+    # the parsing test above already asserts, and would pass with no cap at all.)
+    payload = {
+        "results": [
+            {
+                "url": "https://parallel.test/exact",
+                "title": "Exact",
+                "excerpts": ["z" * _SNIPPET_MAX_CHARS],
+            }
+        ]
+    }
+    respx.post(PARALLEL_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
         results = await provider.search(client, "q", 5, 1, None)
-    assert results[0].snippet == "excerpt one\n\nexcerpt two ... (content truncated)"
+    assert results[0].snippet == "z" * _SNIPPET_MAX_CHARS

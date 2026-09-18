@@ -208,6 +208,10 @@ async def test_page_beyond_the_first_is_refused_without_a_request(make_config, p
 
 @respx.mock
 async def test_out_of_credits_is_a_provider_error_without_retry(make_config):
+    # 402 here exercises the SHARED policy in _http.py, not a measured Tavily
+    # behaviour: what status Tavily actually returns on an exhausted pool is
+    # unverified and its docs publish none — see the instance comment in
+    # src/pipeline_config.py.
     route = respx.post(TAVILY_SEARCH_ENDPOINT).mock(return_value=httpx.Response(402))
     provider = TavilySearch(make_config("tavily_search", api_key="k"))
     async with httpx.AsyncClient() as client:

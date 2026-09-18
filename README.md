@@ -49,9 +49,10 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   it only ever sees pages everything cheaper already bounced off. A single probe
   GET classifies the url. PDFs (Content-Type /
   `.pdf` / `%PDF` magic) are extracted with pypdf — except a PDF with **no text
-  layer** (a scan), which falls through into the chain so the readers (and, for
-  `.pdf` urls, jina's OCR tier) get a shot at it, with pypdf's notice kept as
-  the last resort; for HTML, that same body is
+  layer** (a scan), which falls through into the chain so the remote readers get
+  a shot at it with their own parsers, with pypdf's notice kept as the last
+  resort. jina's OCR tier joins that attempt only when the url path ends in
+  `.pdf` *and* jina is keyed; for HTML, that same body is
   handed to `trafilatura` so the hot path never GETs twice, then the remaining
   instances are tried in order and the first to return content
   `>= FALLBACK_MIN_CHARS` wins.

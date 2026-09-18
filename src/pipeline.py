@@ -514,17 +514,23 @@ class Pipeline:
         # instead, keeping the notice as the last resort if the chain also comes
         # back empty (the behaviour callers had before).
         #
-        # What the chain can actually do with a scan, precisely: every reader
-        # here fetches PDFs server-side with its own parser, so any of them may
-        # find text pypdf could not. jina's OCR tier is the strongest of them,
-        # but it is gated on the URL PATH ending in .pdf (_is_pdf_url in
-        # providers/jina.py) — while this branch also fires for PDFs recognised
-        # by Content-Type or by the %PDF magic alone. So a scan served from
-        # something like /download?id=123 now costs a full chain walk and still
-        # never reaches OCR. That is a real cost for that shape of url, taken
-        # because the other readers are a genuine chance and the case is rare;
-        # widening the OCR gate would mean passing the probe's verdict down into
-        # the provider, which the ReadProvider protocol has no room for today.
+        # What the chain can actually do with a scan, precisely: the REMOTE
+        # readers (jina, tavily, firecrawl, brightdata) fetch the file
+        # server-side with their own parsers and may find text pypdf could not.
+        # trafilatura, which runs first, is an HTML-only extractor and always
+        # fails here — and because probe_html is None on this branch it cannot
+        # reuse the probe body, so it re-downloads the whole file to our host
+        # first. That download is part of the price of this fall-through.
+        #
+        # jina's OCR tier is the strongest chance, but it has TWO gates: the url
+        # PATH must end in .pdf (_is_pdf_url in providers/jina.py) and jina must
+        # be running keyed (the whole ladder sits behind `if api_key`). So a
+        # keyless deployment never reaches OCR at all, and neither does a scan
+        # served from something like /download?id=123 — this branch also fires
+        # for PDFs recognised by Content-Type or %PDF magic alone. How often
+        # that shape of url occurs we have not counted. Widening the gate would
+        # mean passing the probe's verdict down into the provider, which the
+        # ReadProvider protocol has no room for today.
         pdf_notice: str | None = None
         if pdf_text is not None:
             if pdf_text != NO_TEXT_LAYER_NOTICE:

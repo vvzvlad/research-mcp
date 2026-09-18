@@ -17,9 +17,10 @@ from src.providers.base import ProviderError
 PDF_MAGIC = b"%PDF"
 
 # Returned when pypdf parses the file but finds no text. Pipeline.read hands
-# this back only as a LAST resort, after the whole read chain — including jina's
-# OCR tier for .pdf urls — has also failed, so the wording must not promise that
-# OCR was skipped: by the time a caller sees this, it may well have been tried.
+# this back only as a LAST resort, after the whole read chain has also failed —
+# a chain that includes jina's OCR tier when the url path ends in .pdf AND jina
+# is keyed. Both gates matter, so the wording promises neither that OCR ran nor
+# that it was skipped: depending on deployment and url, either is true.
 NO_TEXT_LAYER_NOTICE = (
     "В PDF нет извлекаемого текстового слоя (вероятно, скан из картинок). "
     "Распознать текст не удалось: OCR не дал результата либо недоступен."
