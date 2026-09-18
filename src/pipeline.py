@@ -514,13 +514,15 @@ class Pipeline:
         # instead, keeping the notice as the last resort if the chain also comes
         # back empty (the behaviour callers had before).
         #
-        # What the chain can actually do with a scan, precisely: the REMOTE
-        # readers (jina, tavily, firecrawl, brightdata) fetch the file
-        # server-side with their own parsers and may find text pypdf could not.
-        # trafilatura, which runs first, is an HTML-only extractor and always
-        # fails here — and because probe_html is None on this branch it cannot
-        # reuse the probe body, so it re-downloads the whole file to our host
-        # first. That download is part of the price of this fall-through.
+        # What the chain can actually do with a scan, precisely: jina, tavily,
+        # firecrawl and brightdata fetch the file server-side with their own
+        # parsers and may find text pypdf could not. crawl4ai also fetches on
+        # its own side, but it is a headless browser with no OCR, so on a scan
+        # it is as useless as trafilatura. And trafilatura, which runs FIRST, is
+        # an HTML-only extractor that always fails here — worse, probe_html is
+        # None on this branch, so it cannot reuse the probe body and re-downloads
+        # the whole file to our host before failing. That download is part of
+        # the price of this fall-through.
         #
         # jina's OCR tier is the strongest chance, but it has TWO gates: the url
         # PATH must end in .pdf (_is_pdf_url in providers/jina.py) and jina must

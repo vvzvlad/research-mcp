@@ -269,9 +269,10 @@ async def test_long_excerpts_are_truncated_to_the_snippet_cap(make_config):
 
 @respx.mock
 async def test_a_snippet_exactly_at_the_cap_is_not_touched(make_config):
-    # The boundary, not a short snippet: a snippet of exactly the cap length
-    # must come back whole. (A plain short-snippet test would only repeat what
-    # the parsing test above already asserts, and would pass with no cap at all.)
+    # The boundary: at exactly the cap length the slice must take nothing off —
+    # this is the off-by-one guard (a [:cap - 1], or a ">= cap" branch that
+    # appends an ellipsis, fails here). That the cap exists at all is pinned by
+    # the truncation test above; this one alone would pass without any cap.
     payload = {
         "results": [
             {
