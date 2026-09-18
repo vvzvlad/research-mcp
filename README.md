@@ -30,9 +30,12 @@ Providers are **plugins**. We separate:
 Which instances exist and the order each pipeline tries them is configured **in
 code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
 
-- **Search pipeline** (`searxng → brave → jina-search → serper → exa`): enabled
-  instances run concurrently; results are merged and deduplicated by normalized
-  URL (earlier pipeline position wins). When `JINA_API_KEY` is set (and
+- **Search pipeline** (`searxng → brave → tavily-search → firecrawl-search →
+  jina-search → xmlriver → parallel → octen → linkup → youcom → serper → exa`):
+  enabled instances run concurrently; results are merged and deduplicated by
+  normalized URL (earlier pipeline position wins). Position is therefore a
+  **dedup preference, not a cost gate** — every enabled instance is called on
+  every query, so cost scales with how many keys are set. When `JINA_API_KEY` is set (and
   `SEARCH_RERANK_ENABLED` is not turned off), the full merged list is then
   reranked by `jina-reranker-v3.5` so the trim to `num_results` keeps the most
   relevant hits instead of a blind pipeline-order prefix; any rerank failure
@@ -41,7 +44,10 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   45s and per 1.1s respectively, matching a measured upstream limit); when the
   slot is taken they **skip** the current search instead of waiting for it.
 - **Read pipeline** (`trafilatura → jina → crawl4ai → tavily-1 → tavily-2 →
-  firecrawl`): a single probe GET classifies the url. PDFs (Content-Type /
+  firecrawl → brightdata`): here the order IS a cost gate — it stops at the
+  first sufficient answer, and `brightdata` (the anti-bot unlocker) sits last so
+  it only ever sees pages everything cheaper already bounced off. A single probe
+  GET classifies the url. PDFs (Content-Type /
   `.pdf` / `%PDF` magic) are extracted with pypdf; for HTML, that same body is
   handed to `trafilatura` so the hot path never GETs twice, then the remaining
   instances are tried in order and the first to return content
@@ -96,13 +102,20 @@ Provider env vars: `SEARXNG_URL`, `BRAVE_API_KEY`, `SERPER_API_KEY`, `EXA_API_KE
 (one key enables the `jina` reader in keyed mode, the `jina-search` provider and
 the search reranker; the reader alone also works keyless), `CRAWL4AI_URL` +
 `CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`, `TAVILY_2_API_KEY`, `FIRECRAWL_API_KEY`.
+The Tavily and Firecrawl keys each enable **two** instances — the reader and the
+search provider — because both vendors sell search and extract off one key.
+Keyless until registered: `XMLRIVER_USER_ID` + `XMLRIVER_API_KEY` (Yandex SERP),
+`PARALLEL_API_KEY`, `OCTEN_API_KEY`, `LINKUP_API_KEY`, `YOUCOM_API_KEY`, and
+`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`.
 
 ## Proxy
 
 Any external instance can be routed through its own **SOCKS5/HTTP proxy** by
 setting `<INSTANCE>_PROXY` — useful for clean egress past IP-based blocks (e.g.
 Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`,
-`JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`. Internal
+`JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`,
+`XMLRIVER_PROXY`, `PARALLEL_PROXY`, `OCTEN_PROXY`, `LINKUP_PROXY`,
+`YOUCOM_PROXY`, `BRIGHTDATA_PROXY`. Internal
 instances (`searxng`, `crawl4ai`, `trafilatura`) have no proxy.
 
 The value is passed straight to httpx; `socks5://host:port` does **proxy-side
