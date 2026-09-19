@@ -2,9 +2,8 @@
 
 A stateless **MCP facade** that hides a pyramid of search/read providers behind a
 single streamable-http MCP endpoint and exposes just **4 clean tools** with good
-Russian help texts. An LLM gets a simple "search → read" toolset (or both at
-once); behind it, several providers are tried, merged, and failed over
-automatically.
+help texts. An LLM gets a simple "search → read" toolset (or both at once);
+behind it, several providers are tried, merged, and failed over automatically.
 
 The app does **no authentication** — it is published through Traefik + basicAuth
 on the host. It holds no application state: the only thing persisted is a log
