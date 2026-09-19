@@ -1,6 +1,7 @@
 """FastMCP server wiring: build the facade and register the 4 research tools.
 
-Tool descriptions are in Russian (LLM-facing); code and comments are in English.
+Tool descriptions are in English, like the code and comments; the per-answer
+status lines rendered by ``src/formatting.py`` are still in Russian.
 Each tool wraps the pipeline call in ``try/except`` and returns a clean value (a
 string, or a ``{summary, pages}`` / ``{summary, results}`` dict for the batch
 tools) so the LLM always gets a usable result instead of a traceback. Every
@@ -86,24 +87,24 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
     @mcp.tool(
         name="web_search",
         description=(
-            "Поиск в вебе. Агрегирует несколько источников (SearXNG-метапоиск + при "
-            "наличии Brave/Serper/Exa), мёржит и дедуплицирует результаты. Возвращает "
-            "ранжированный список: заголовок, URL, сниппет.\n\n"
-            "Параметры:\n"
-            "- query: поисковый запрос. Один запрос = одна тема; для разных тем "
-            "вызывай отдельно.\n"
-            "- num_results: сколько результатов вернуть (по умолчанию 8, максимум 50).\n"
-            "- page: номер страницы выдачи (по умолчанию 1) — для более глубоких "
-            "результатов.\n"
-            '- language: код языка для приоритета (например "ru", "en"); по умолчанию '
-            "без ограничения.\n\n"
-            "Это ТОЛЬКО поиск, он НЕ читает страницы. Чтобы получить содержимое — "
-            "возьми url из результата и передай в read_page (или несколько url в "
+            "Web search. Aggregates several sources (DuckDuckGo out of the box, plus "
+            "a self-hosted SearXNG and every paid vendor whose key is configured), "
+            "merges and deduplicates the results. Returns a ranked list: title, URL, "
+            "snippet.\n\n"
+            "Parameters:\n"
+            "- query: the search query. One query = one topic; for different topics "
+            "call it separately.\n"
+            "- num_results: how many results to return (default 8, maximum 50).\n"
+            "- page: result page number (default 1) — for deeper results.\n"
+            '- language: language code to prioritise (e.g. "ru", "en"); unrestricted '
+            "by default.\n\n"
+            "This is ONLY search, it does NOT read pages. To get the content, take a "
+            "url from a result and pass it to read_page (or several urls to "
             "read_pages).\n\n"
-            "Когда брать именно его: нужны только ссылки и сниппеты — осмотреться по "
-            "теме, набрать источники, проверить, существует ли что-то вообще. Если "
-            "содержимое страниц всё равно понадобится — не делай поиск и чтение двумя "
-            "вызовами, бери search_and_read (поиск + содержимое за один вызов)."
+            "When to take this one: you need links and snippets only — to survey a "
+            "topic, collect sources, check whether something exists at all. If the "
+            "page content will be needed anyway, do not spend two calls on search and "
+            "read — take search_and_read (search + content in one call)."
         ),
     )
     async def web_search(
@@ -126,22 +127,22 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
     @mcp.tool(
         name="read_page",
         description=(
-            "Скачать ОДНУ веб-страницу или PDF по url и вернуть основной текст в "
-            "чистом Markdown. Сам определяет тип и сам выбирает способ извлечения.\n\n"
-            "Параметр:\n"
-            "- url: полный http(s)-адрес страницы или PDF.\n\n"
-            "Как работает: HTML — чистится от навигации/футера/сайдбара/рекламы; для "
-            "JS-страниц и сайтов за бот-защитой автоматически задействуются более "
-            "тяжёлые методы извлечения; PDF — извлекается текстовый слой, а для "
-            "сканов без него может быть задействовано распознавание, и если "
-            "текст получить не удалось, вернётся пометка об этом.\n\n"
-            "Ошибку вернёт только если страница недоступна всеми способами. НЕ ретрай "
-            "такой url повторно — это не транзиентный сбой.\n"
-            "Для нескольких url за один вызов — read_pages.\n\n"
-            "Когда брать именно его: url ровно один и он уже известен; только здесь "
-            "страница возвращается целиком, без обрезки по объёму. Несколько известных "
-            "url — read_pages; url ещё неизвестны и тему надо исследовать — "
-            "search_and_read."
+            "Download ONE web page or PDF by url and return its main text as clean "
+            "Markdown. It detects the type and picks the extraction method itself.\n\n"
+            "Parameter:\n"
+            "- url: the full http(s) address of a page or a PDF.\n\n"
+            "How it works: HTML is stripped of navigation/footer/sidebar/ads; for "
+            "JS-rendered pages and sites behind bot protection heavier extraction "
+            "methods are engaged automatically; for a PDF the text layer is "
+            "extracted, a scan without one may go through recognition, and if no text "
+            "could be obtained the answer says so.\n\n"
+            "It returns an error only if the page is unreachable by every method. Do "
+            "NOT retry such a url — this is not a transient failure.\n"
+            "For several urls in one call — read_pages.\n\n"
+            "When to take this one: there is exactly one url and it is already known; "
+            "this is the only tool that returns a page whole, with no size cap. "
+            "Several known urls — read_pages; urls not known yet and the topic has to "
+            "be researched — search_and_read."
         ),
     )
     async def read_page(url: str) -> str:
@@ -163,22 +164,22 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
     @mcp.tool(
         name="read_pages",
         description=(
-            "Скачать НЕСКОЛЬКО страниц или PDF за один вызов (до 20) — каждую в чистый "
-            "Markdown, как read_page (с тем же авто-определением типа и перебором "
-            "способов извлечения). Используй это вместо цикла из read_page, когда "
-            "нужно прочитать пачку url.\n\n"
-            "Параметр:\n"
-            "- urls: список http(s)-адресов (до 20).\n\n"
-            "Возвращает объект {summary, pages}: summary — строка состояния по батчу, "
-            "pages — список объектов {url, ok, markdown|error, reason}: ok=false с "
-            "текстом ошибки и категорией причины для тех url, что не открылись всеми "
-            "способами, остальные — с markdown.\n\n"
-            "Слишком длинный текст страницы обрезается с явной пометкой "
-            "[содержимое обрезано на N символах].\n"
-            "Когда брать именно его: url уже известны — из прошлой выдачи или от "
-            "пользователя. Если url ещё неизвестны, не делай web_search + read_pages "
-            "двумя шагами (лишний round-trip и лишний контекст) — вызови "
-            "search_and_read. Один url целиком, без обрезки — read_page."
+            "Download SEVERAL pages or PDFs in one call (up to 20) — each into clean "
+            "Markdown, the way read_page does it (same type detection, same chain of "
+            "extraction methods). Use this instead of a loop of read_page calls when "
+            "a batch of urls has to be read.\n\n"
+            "Parameter:\n"
+            "- urls: a list of http(s) addresses (up to 20).\n\n"
+            "Returns an object {summary, pages}: summary is one status line for the "
+            "batch, pages is a list of {url, ok, markdown|error, reason} — ok=false "
+            "with the error text and a failure category for the urls that did not "
+            "open by any method, the rest with markdown.\n\n"
+            "Page text that is too long is truncated, with an explicit marker naming "
+            "how many characters were dropped.\n"
+            "When to take this one: the urls are already known — from an earlier "
+            "result list or from the user. If they are not known yet, do not spend "
+            "two steps on web_search + read_pages (an extra round-trip and extra "
+            "context) — call search_and_read. One url whole, uncapped — read_page."
         ),
     )
     async def read_pages(urls: list[str]) -> dict[str, Any]:
@@ -219,31 +220,30 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
     @mcp.tool(
         name="search_and_read",
         description=(
-            "Поиск в вебе + содержимое верхних результатов за ОДИН вызов. Дефолтный "
-            "инструмент для исследования темы: не нужно сначала звать web_search, а "
-            "потом read_pages — экономит round-trip и контекст на промежуточной "
-            "выдаче.\n\n"
-            "Параметры:\n"
-            "- query: поисковый запрос. Один запрос = одна тема; для разных тем "
-            "вызывай отдельно.\n"
-            "- num_results: сколько ПРОЧИТАННЫХ страниц вернуть (по умолчанию 5, "
-            "максимум 20).\n"
-            "- page: номер страницы выдачи (по умолчанию 1).\n"
-            '- language: код языка для приоритета (например "ru", "en"); по умолчанию '
-            "без ограничения.\n\n"
-            "Как работает: поиск запрашивается с запасом (часть url не открывается), "
-            "верхние результаты читаются волнами, пока не наберётся num_results "
-            "прочитанных страниц; сначала идут успешно прочитанные (в порядке выдачи), "
-            "затем неудачные — в остаток лимита. Каждая страница — чистый Markdown, "
-            "как в read_page; слишком длинный текст обрезается с явной пометкой "
-            "[содержимое обрезано на N символах].\n\n"
-            "Возвращает объект {summary, results}: summary — строки состояния по "
-            "поиску и по чтению, results — список объектов "
+            "Web search + the content of the top results in ONE call. The default "
+            "tool for researching a topic: no need to call web_search first and "
+            "read_pages after — it saves a round-trip and the context the "
+            "intermediate result list would cost.\n\n"
+            "Parameters:\n"
+            "- query: the search query. One query = one topic; for different topics "
+            "call it separately.\n"
+            "- num_results: how many READ pages to return (default 5, maximum 20).\n"
+            "- page: result page number (default 1).\n"
+            '- language: language code to prioritise (e.g. "ru", "en"); unrestricted '
+            "by default.\n\n"
+            "How it works: the search is over-fetched (some urls will not open), the "
+            "top results are read in waves until num_results pages have opened; the "
+            "successfully read ones come first (in result order), the failed ones "
+            "after them, within what is left of the limit. Each page is clean "
+            "Markdown, as in read_page; text that is too long is truncated, with an "
+            "explicit marker naming how many characters were dropped.\n\n"
+            "Returns an object {summary, results}: summary is the status lines for "
+            "the search and for the reads, results is a list of "
             "{title, url, snippet, ok, markdown|error, reason}.\n\n"
-            "Когда брать именно его: тема исследуется с нуля и нужен текст страниц, а "
-            "не только ссылки. Нужны ТОЛЬКО ссылки и сниппеты — web_search. Url уже "
-            "известны — read_pages (несколько) или read_page (один url, целиком и без "
-            "обрезки)."
+            "When to take this one: a topic is being researched from scratch and the "
+            "page text is needed, not just links. ONLY links and snippets — "
+            "web_search. Urls already known — read_pages (several) or read_page (one "
+            "url, whole and uncapped)."
         ),
     )
     async def search_and_read(

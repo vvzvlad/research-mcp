@@ -1,5 +1,5 @@
 """Server wiring: the 4 tools are registered, descriptions are the verbatim
-Russian texts (plus the cross-references), and each tool delegates to the
+English texts (plus the cross-references), and each tool delegates to the
 pipeline without ever raising.
 """
 
@@ -142,31 +142,37 @@ async def test_four_tools_registered(server):
     assert tools == {"web_search", "read_page", "read_pages", "search_and_read"}
 
 
-async def test_descriptions_are_verbatim_russian(server):
+async def test_descriptions_are_verbatim_english(server):
+    # The texts are LLM-facing product, not documentation: they are pinned here
+    # so a rewrite is a deliberate act. Russian survives only in the status
+    # lines rendered by src/formatting.py, never in a description.
     by_name = {t.name: t for t in await server.list_tools()}
     ws = by_name["web_search"].description
-    assert ws.startswith("Поиск в вебе. Агрегирует несколько источников")
-    assert "SearXNG-метапоиск + при наличии Brave/Serper/Exa" in ws
-    # The cross-reference was APPENDED — the old closing sentence stays.
-    assert "Это ТОЛЬКО поиск, он НЕ читает страницы." in ws
+    assert ws.startswith("Web search. Aggregates several sources")
+    # The source list must not name a stale roster: duckduckgo is always on and
+    # the paid vendors come and go with their keys.
+    assert "DuckDuckGo out of the box" in ws
+    assert "This is ONLY search, it does NOT read pages." in ws
     rp = by_name["read_page"].description
-    assert rp.startswith("Скачать ОДНУ веб-страницу или PDF по url")
+    assert rp.startswith("Download ONE web page or PDF by url")
     # The description must not promise that scans come back empty or that no OCR
     # happens: since the scan fall-through, a .pdf url on a keyed deployment does
     # buy the jina OCR tier, and a scan never returns "" — it returns either text
     # or NO_TEXT_LAYER_NOTICE.
-    assert "OCR нет" not in rp
-    assert "вернут пусто" not in rp
-    assert "распознавание" in rp
-    # And the cross-reference was APPENDED here too — the old sentence stays.
-    assert "Для нескольких url за один вызов — read_pages." in rp
+    assert "no OCR" not in rp
+    assert "come back empty" not in rp
+    assert "recognition" in rp
+    assert "For several urls in one call — read_pages." in rp
     rps = by_name["read_pages"].description
-    assert rps.startswith("Скачать НЕСКОЛЬКО страниц или PDF за один вызов (до 20)")
-    # Only the sentence describing the return shape changed with the summary.
+    assert rps.startswith("Download SEVERAL pages or PDFs in one call (up to 20)")
     assert "{url, ok, markdown|error, reason}" in rps
-    assert "summary — строка состояния по батчу" in rps
+    assert "summary is one status line for the batch" in rps
     sar = by_name["search_and_read"].description
-    assert sar.startswith("Поиск в вебе + содержимое верхних результатов за ОДИН вызов.")
+    assert sar.startswith("Web search + the content of the top results in ONE call.")
+    # No description may quote a runtime string that is still Russian: the
+    # truncation marker is described, never reproduced.
+    for description in (ws, rp, rps, sar):
+        assert "содержимое обрезано" not in description
 
 
 async def test_descriptions_cross_reference_each_other(server):
@@ -174,7 +180,7 @@ async def test_descriptions_cross_reference_each_other(server):
     # each says when to take IT and which of the others to take instead.
     by_name = {t.name: t.description for t in await server.list_tools()}
     for name, description in by_name.items():
-        assert "Когда брать именно его" in description, name
+        assert "When to take this one" in description, name
 
     ws, rp, rps, sar = (
         by_name["web_search"],
@@ -183,13 +189,13 @@ async def test_descriptions_cross_reference_each_other(server):
         by_name["search_and_read"],
     )
     # web_search: only links/snippets; content wanted → the combined tool.
-    assert "только ссылки и сниппеты" in ws
+    assert "links and snippets only" in ws
     assert "search_and_read" in ws
     # read_page: one known url; the alternatives for the other two cases.
-    assert "url ровно один" in rp
+    assert "exactly one url" in rp
     assert "read_pages" in rp and "search_and_read" in rp
     # read_pages: urls already known; unknown urls → the combined tool.
-    assert "url уже известны" in rps
+    assert "the urls are already known" in rps
     assert "search_and_read" in rps and "read_page" in rps
     # search_and_read: the default for research, and when NOT to take it.
     assert "web_search" in sar and "read_pages" in sar and "read_page" in sar

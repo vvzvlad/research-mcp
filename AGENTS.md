@@ -1,7 +1,7 @@
 # Agent Instructions — research-mcp
 
 An MCP "facade" that hides a pyramid of search/read providers behind a single
-streamable-http MCP endpoint and exposes **4 clean tools** with good Russian help
+streamable-http MCP endpoint and exposes **4 clean tools** with good English help
 texts. No auth in the app: Traefik + basicAuth on the host handles it. No
 application state — the only thing persisted is a log file under `data/` (kept on
 a volume across restarts/image updates).
@@ -100,8 +100,10 @@ make run               # serve streamable-http on MCP_HOST:MCP_PORT, endpoint /m
 4. document the ENV var in `.env.example`.
 
 ## Conventions
-- Tool descriptions (LLM-facing) are in Russian and are the product of this
-  project — do not change their wording. All other code/comments in English.
+- Tool descriptions (LLM-facing) are in English and are the product of this
+  project — do not change their wording. The other LLM-facing texts — the status
+  lines and failure labels in `src/formatting.py` — are still in Russian. All
+  code/comments in English.
 - `INSTANCES` holds ENV variable **names**, NEVER values. No real keys/urls in
   code, git, or `.env.example` (placeholders only); secrets live only in `.env` /
   prod `environment:`.
