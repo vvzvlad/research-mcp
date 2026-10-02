@@ -87,32 +87,56 @@ def _clock(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def _pick_track(renderer: dict, tracks: list[dict]) -> dict:
+def _base_language(code: str | None) -> str:
+    """``en`` for ``en``, ``en-US``, ``en-US.4`` — the comparable part of a code."""
+    return (code or "").split(".")[0].split("-")[0].lower()
+
+
+def _spoken_language(player: dict, tracks: list[dict]) -> str:
+    """The base language actually spoken in the video ("" when unknown).
+
+    An auto-dubbed video lists one audio track per dub in ``streamingData``, and
+    the caption list then carries an ``asr`` track for EVERY dub, sorted by
+    language name — so the first ``asr`` track is merely the alphabetically
+    first dub (Arabic on -xZfqwRWpPg). The original audio is the one whose
+    display name says "original"; the names are English because we send no
+    ``hl``. Measured: ``audioIsDefault`` follows the viewer language (``hl=ru``
+    moves it to the Russian dub), and the renderer's ``defaultCaptionTrackIndex``
+    moves to a MANUAL track in the viewer language when one exists (TED with
+    ``hl=ru`` → ru) — so neither of them names the spoken language.
+
+    A plain video carries no audio-track info and exactly one ``asr`` track,
+    which is in the spoken language.
+    """
+    for fmt in (player.get("streamingData") or {}).get("adaptiveFormats") or []:
+        audio = fmt.get("audioTrack") or {}
+        if "original" in (audio.get("displayName") or "").lower():
+            return _base_language(audio.get("id"))
+    asr = next((track for track in tracks if track.get("kind") == "asr"), None)
+    return _base_language(asr.get("languageCode")) if asr else ""
+
+
+def _pick_track(player: dict, tracks: list[dict]) -> dict:
     """Choose the caption track to read.
 
-    The auto-generated (``asr``) track names the language actually spoken, so a
-    manual track in that language — written by a human, hence better — wins;
-    otherwise the auto-generated one. A video with no ``asr`` track at all gets
-    the track YouTube itself shows by default (the default audio track's
-    ``defaultCaptionTrackIndex``), else the first one listed — the list is
-    sorted by language name, so the first one is merely alphabetical.
+    A track in the spoken language wins — a manual one (written by a human,
+    hence better) over the auto-generated one. When the spoken language is
+    unknown or has no track (no ``asr`` track and no dub info, e.g. a video with
+    only uploaded translations), YouTube's own default caption track, else the
+    first one listed (alphabetical).
     """
-    asr = next((track for track in tracks if track.get("kind") == "asr"), None)
-    if asr is None:
-        audio = renderer.get("audioTracks") or []
-        index = renderer.get("defaultAudioTrackIndex") or 0
-        default = audio[index].get("defaultCaptionTrackIndex") if index < len(audio) else None
-        if isinstance(default, int) and 0 <= default < len(tracks):
-            return tracks[default]
-        return tracks[0]
-    spoken = asr.get("languageCode") or ""
-    for track in tracks:
-        if track.get("kind") == "asr":
-            continue
-        code = track.get("languageCode") or ""
-        if code == spoken or code.startswith(spoken + "-"):
-            return track
-    return asr
+    spoken = _spoken_language(player, tracks)
+    same = [track for track in tracks if spoken and _base_language(track.get("languageCode")) == spoken]
+    manual = [track for track in same if track.get("kind") != "asr"]
+    if same:
+        return (manual or same)[0]
+    renderer = (player.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {}
+    audio = renderer.get("audioTracks") or []
+    index = renderer.get("defaultAudioTrackIndex") or 0
+    default = audio[index].get("defaultCaptionTrackIndex") if index < len(audio) else None
+    if isinstance(default, int) and 0 <= default < len(tracks):
+        return tracks[default]
+    return tracks[0]
 
 
 def _parse_snippets(body: bytes) -> list[tuple[float, str]]:
@@ -185,7 +209,7 @@ async def fetch_transcript(client: httpx.AsyncClient, video_id: str, retries: in
     if not tracks:
         # "empty response" is the wording classify() maps to `empty`.
         raise ProviderError("youtube: empty response (the video has no captions)")
-    track = _pick_track(renderer, tracks)
+    track = _pick_track(player, tracks)
 
     # The srv3 format is a richer XML with per-word timing; without the
     # parameter the endpoint answers with the plain <transcript> shape.

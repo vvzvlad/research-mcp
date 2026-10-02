@@ -101,7 +101,10 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   **transcript** — title, channel, description and the captions as timestamped
   paragraphs — fetched from YouTube's own player API (the unofficial ANDROID
   client, the same one `youtube-transcript-api` uses). The track in the spoken
-  language wins: a manual one when it exists, the auto-generated one otherwise.
+  language wins — a manual one when it exists, the auto-generated one otherwise.
+  The spoken language comes from the audio track marked "original" on an
+  auto-dubbed video (which carries auto-generated captions for every dub), and
+  from the single auto-generated track on a plain one.
   A video without captions, or a fetch that fails, falls through to the normal
   chain above.
 
