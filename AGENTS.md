@@ -39,6 +39,9 @@ a volume across restarts/image updates).
   row's href could be read. An empty list means only that the search ran and left
   nothing: DuckDuckGo's own "no results" page, or a page of ads only.
 - `src/providers/pdf.py` — PDF detection + pypdf extraction (used by the pipeline, not a tool).
+- `src/providers/youtube.py` — YouTube video-url detection + transcript fetch via
+  YouTube's player API (ANDROID client); used by `Pipeline.read` before the
+  probe, a failure falls through to the read chain. Routed via `YOUTUBE_PROXY`.
 - `src/pipeline_config.py` — `INSTANCES`, `SEARCH_PIPELINE`, `READ_PIPELINE`.
 - `src/pipeline.py` — instance loader, `ClientManager` (one httpx client per
   proxy URL), search (merge/dedup/rerank) and read (fallback) logic, plus
@@ -66,7 +69,7 @@ a volume across restarts/image updates).
 - stderr + a persistent file sink at `data/research-mcp.log` (loguru rotation +
   retention; survives restart/image update via the `data/` volume).
 - `pipeline.search` / `pipeline.read` emit one per-request line each (tool,
-  target url/query, winning provider/tier or `pdf`, count, latency, ok); the
+  target url/query, winning provider/tier or `pdf`/`youtube`, count, latency, ok); the
   search line also names the instances that came back `empty=` and those that
   `failed=`, with their `reasons=` categories (the failed read line carries them
   too); `read_pages` adds a `count/ok` summary and `search_and_read` a
@@ -77,6 +80,8 @@ a volume across restarts/image updates).
 - An external instance can route through a SOCKS5/HTTP proxy via `<INSTANCE>_PROXY`
   (`EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`, `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`,
   `FIRECRAWL_PROXY`); internal instances (searxng/crawl4ai/trafilatura) have none.
+- `YOUTUBE_PROXY` is the one proxy var outside `INSTANCES`: `Pipeline.build`
+  reads it for the YouTube transcript path, like `JINA_PROXY` for the reranker.
 - `Instance.proxy_env` holds the ENV var NAME (never a value); the loader resolves
   it into `ProviderConfig.proxy`, exposed as `provider.proxy`.
 - `ClientManager.client_for(proxy)` lazily creates/caches one httpx client per
