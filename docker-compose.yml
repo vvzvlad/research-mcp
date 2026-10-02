@@ -46,6 +46,7 @@ services:
       # TAVILY_1_PROXY: socks5://proxy.invalid:1080
       # TAVILY_2_PROXY: socks5://proxy.invalid:1080
       # FIRECRAWL_PROXY: socks5://proxy.invalid:1080
+      # YOUTUBE_PROXY: socks5://proxy.invalid:1080   # YouTube transcripts; required where youtube.com is blocked
       TZ: Europe/Moscow
     networks:
       - docker_main_net

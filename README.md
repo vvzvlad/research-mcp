@@ -96,6 +96,14 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   handed to `trafilatura` so the hot path never GETs twice, then the remaining
   instances are tried in order and the first to return content
   `>= FALLBACK_MIN_CHARS` wins.
+  A **YouTube video url** (`youtube.com/watch?v=…`, `/shorts/…`, `/live/…`,
+  `/embed/…`, `youtu.be/…`) is answered before the probe with the video's
+  **transcript** — title, channel, description and the captions as timestamped
+  paragraphs — fetched from YouTube's own player API (the unofficial ANDROID
+  client, the same one `youtube-transcript-api` uses). The track in the spoken
+  language wins: a manual one when it exists, the auto-generated one otherwise.
+  A video without captions, or a fetch that fails, falls through to the normal
+  chain above.
 
 Cross-cutting: one transient retry (5xx / transport errors) with a short backoff;
 **402 (out of credits) / 429 (rate limited) are treated as a provider failure →
@@ -171,6 +179,11 @@ Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `BRAVE_PROXY`,
 have no proxy: the internal `searxng` / `crawl4ai` / `trafilatura` (which still
 take their own url/token vars) and the keyless `duckduckgo`.
 
+`YOUTUBE_PROXY` routes the YouTube transcript path (not an instance, see the read
+pipeline above). Where youtube.com is blocked — or the egress IP is flagged as a
+bot, which YouTube answers with "Sign in to confirm you're not a bot" — transcripts
+work only through it.
+
 The value is passed straight to httpx; `socks5://host:port` does **proxy-side
 DNS** (the target hostname is resolved by the proxy, like `curl
 --socks5-hostname`), and `socks5h://` / `http://host:port` are also accepted.
@@ -187,7 +200,7 @@ server writes a **persistent log file** to `data/research-mcp.log` (default;
 so it survives container restarts and image updates. The file carries one
 **per-request line** per tool call — search (`query`, which provider instances
 actually ran, result count, latency) and read (`url`, the winning provider/tier
-or `pdf`, `ok`, latency), plus a `read_pages count=N ok=K` summary — making it
+or `pdf`/`youtube`, `ok`, latency), plus a `read_pages count=N ok=K` summary — making it
 useful for analyzing how requests distribute across provider tiers. No request
 bodies or secrets are logged, only urls/queries, provider names, counts, timings.
 
@@ -207,6 +220,7 @@ the log file across updates) — we never build on prod.
 | `src/providers/registry.py` | `@register` decorator → `REGISTRY`. |
 | `src/providers/<type>.py` | One module per provider type. |
 | `src/providers/pdf.py` | PDF detection + pypdf text extraction (used by the pipeline). |
+| `src/providers/youtube.py` | YouTube video-url detection + transcript fetch (used by the pipeline). |
 | `src/pipeline_config.py` | In-code instances + pipeline order. |
 | `src/pipeline.py` | Instance loader + search/read logic (and `search_and_read`, their composition). |
 | `src/rerank.py` | `JinaReranker` — post-merge rerank of search results. |

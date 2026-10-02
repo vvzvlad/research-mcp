@@ -14,7 +14,9 @@ order on any failure), and trims to ``num_results``. It returns a
 or failed — so the caller can tell "nothing matched" from "the search itself
 broke".
 
-Read first detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic) and
+Read first tries a YouTube video url as a transcript (``src/providers/youtube.py``,
+routed via ``YOUTUBE_PROXY``); a video without one falls through to the normal
+path. Read then detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic) and
 extracts them with pypdf. Otherwise it tries the enabled ``READ_PIPELINE``
 instances in order; the first to return content ``>= fallback_min_chars`` wins;
 thin/empty/error → next instance. It returns a ``ReadOutcome``: the markdown
@@ -62,6 +64,7 @@ from src.providers.base import (
 from src.providers.pdf import NO_TEXT_LAYER_NOTICE, extract_pdf_text, looks_like_pdf
 from src.providers.registry import REGISTRY
 from src.providers.trafilatura import TrafilaturaRead, extract_markdown
+from src.providers.youtube import fetch_transcript, video_id
 from src.rerank import JinaReranker
 from src.settings import Settings
 
@@ -92,8 +95,9 @@ class SearchOutcome:
 class ReadOutcome:
     """One read request: the markdown plus how the pipeline got hold of it.
 
-    ``provider`` is the instance that won (``"pdf"`` for the PDF path, which no
-    instance serves), ``tried`` is the chain walked up to and including it, and
+    ``provider`` is the instance that won (``"pdf"`` / ``"youtube"`` for the PDF
+    and YouTube-transcript paths, which no instance serves), ``tried`` is the
+    chain walked up to and including it (``"youtube"`` first for a video url), and
     ``failures`` pairs every instance that did not deliver with its
     ``src.failure_reason`` category. ``thin`` marks the last-resort branch: every
     instance came back under ``fallback_min_chars`` and the longest of those
@@ -323,6 +327,7 @@ class Pipeline:
         client: httpx.AsyncClient | None = None,
         paid_names: set[str] | frozenset[str] | None = None,
         reranker: JinaReranker | None = None,
+        youtube_proxy: str | None = None,
     ) -> None:
         self._settings = settings
         self._search = search_instances
@@ -331,6 +336,9 @@ class Pipeline:
         # it transforms the merged list instead of producing results, so it is
         # wired separately from the provider lists.
         self._reranker = reranker
+        # Proxy for the YouTube transcript path (None = direct). Not an instance
+        # either: read() runs that path ahead of the probe and the read chain.
+        self._youtube_proxy = youtube_proxy
         # Names of the enabled instances whose TYPE bills per successful request.
         self._paid: frozenset[str] = frozenset(paid_names or ())
         # Cumulative BILLED counters for this process: paid calls and total
@@ -437,6 +445,13 @@ class Pipeline:
             paid_names.add(reranker.name)
             logger.info("Search rerank enabled (jina-reranker-v3.5)")
 
+        # The YouTube transcript path is not an instance, so its proxy is read
+        # here like the reranker's. Some hosts (prod among them) cannot reach
+        # youtube.com directly. The value is never logged.
+        youtube_proxy = os.getenv("YOUTUBE_PROXY")
+        if youtube_proxy:
+            logger.info("YouTube transcripts route via proxy")
+
         return cls(  # type: ignore[arg-type]
             settings,
             search_instances,
@@ -444,6 +459,7 @@ class Pipeline:
             client=client,
             paid_names=paid_names,
             reranker=reranker,
+            youtube_proxy=youtube_proxy,
         )
 
     async def aclose(self) -> None:
@@ -635,13 +651,14 @@ class Pipeline:
         tried: list[str] = []
         billed: list[str] = []
         # Model-facing telemetry: one (instance, reason) pair per attempt that
-        # did not deliver — the structured twin of the `errors` texts below, so
-        # both lists stay in step.
+        # did not deliver — the structured twin of the `errors` texts, so both
+        # lists stay in step.
         failures: list[tuple[str, str]] = []
+        errors: list[str] = []
 
         def _log_ok(provider_name: str, suffix: str = "") -> None:
             # Fold the billed calls into the cumulative counters and emit the
-            # single success line. Used by the pdf / full / thin branches so the
+            # single success line. Used by the youtube / pdf / full / thin branches so the
             # accounting fields stay identical everywhere.
             paid_calls, pct = self._account(billed)
             logger.info(
@@ -656,6 +673,38 @@ class Pipeline:
                 tried,
                 _ms(),
             )
+
+        # 0) A YouTube video: its page is only chrome, so ask YouTube for the
+        #    transcript first. The hosts are fixed (youtube.com), hence the plain
+        #    client bound to YOUTUBE_PROXY, not the guarded one. Not billed. Any
+        #    failure — no captions, a bot wall, a dead proxy — is recorded like a
+        #    read-provider failure and falls through to the normal path below,
+        #    which still returns whatever the page itself offers.
+        vid = video_id(url)
+        if vid is not None:
+            tried.append("youtube")
+            try:
+                markdown = await fetch_transcript(
+                    self._clients.client_for(self._youtube_proxy), vid, self._settings.retries
+                )
+            except ProviderError as exc:
+                errors.append(str(exc))
+                failures.append(("youtube", failure_reason.classify(exc)))
+                logger.info("read url={} -> youtube transcript failed: {}", url, exc)
+            except Exception as exc:  # noqa: BLE001 — treat as provider failure
+                errors.append(f"youtube: {exc}")
+                failures.append(("youtube", failure_reason.classify(exc)))
+                logger.info("read url={} -> youtube transcript failed: {}", url, exc)
+            else:
+                _log_ok("youtube")
+                return ReadOutcome(
+                    markdown=markdown,
+                    provider="youtube",
+                    tried=list(tried),
+                    failures=list(failures),
+                    thin=False,
+                    elapsed_ms=_ms(),
+                )
 
         # 1) One probe GET decides the path. If it is a PDF, we are done; if it
         #    is HTML, reuse that body for the trafilatura step (no second GET).
@@ -706,7 +755,6 @@ class Pipeline:
             pdf_notice = pdf_text
 
         # 2) HTML path: walk the read pipeline until one yields enough content.
-        errors: list[str] = []
         best_thin: str | None = None
         best_thin_name: str | None = None
         for provider in self._read:
