@@ -174,6 +174,74 @@ async def test_fetch_transcript_without_asr_takes_the_default_caption_track():
     assert "Captions: English" in markdown
 
 
+@respx.mock
+async def test_fetch_transcript_auto_dubbed_video_takes_the_original_audio_language():
+    # The shape of -xZfqwRWpPg: an English video auto-dubbed into many languages
+    # carries an asr track per dub, sorted by name, so Arabic comes first.
+    # audioIsDefault points at the Russian dub, as it does for hl=ru; the
+    # renderer's default caption index is pointed at the Russian track too,
+    # to prove it is not consulted once the original audio is known. Only the
+    # "original" audio track names the spoken language.
+    tracks = [
+        _track("ar", asr=True, name="Arabic (auto-generated)"),
+        _track("en", asr=True, name="English (auto-generated)"),
+        _track("en-US", name="English (United States)"),
+        _track("ru", asr=True, name="Russian (auto-generated)"),
+    ]
+    body = _player(tracks)
+    body["streamingData"] = {
+        "adaptiveFormats": [
+            {"audioTrack": {"id": "ar.10", "displayName": "Arabic", "audioIsDefault": False}},
+            {"audioTrack": {"id": "ru.10", "displayName": "Russian", "audioIsDefault": True}},
+            {
+                "audioTrack": {
+                    "id": "en-US.4",
+                    "displayName": "English (US) original",
+                    "audioIsDefault": False,
+                }
+            },
+        ]
+    }
+    renderer = body["captions"]["playerCaptionsTracklistRenderer"]
+    renderer["audioTracks"] = [{"audioTrackId": "ru.10", "defaultCaptionTrackIndex": 3}]
+    renderer["defaultAudioTrackIndex"] = 0
+    respx.post(PLAYER_ENDPOINT).mock(return_value=httpx.Response(200, json=body))
+    english = respx.get(TIMEDTEXT, params={"lang": "en-US"}).mock(
+        return_value=httpx.Response(200, text=TRANSCRIPT_XML)
+    )
+
+    async with httpx.AsyncClient() as client:
+        markdown = await fetch_transcript(client, VIDEO, retries=0)
+
+    assert english.call_count == 1
+    assert "Captions: English (United States)" in markdown
+
+
+@respx.mock
+async def test_fetch_transcript_ignores_the_viewer_default_on_a_plain_video():
+    # A Russian video with uploaded English subtitles: YouTube's default caption
+    # track follows the viewer language (English, since we send no hl), but the
+    # spoken language is the asr track's, so the Russian one is read.
+    tracks = [
+        _track("en", name="English"),
+        _track("ru", asr=True, name="Russian (auto-generated)"),
+    ]
+    body = _player(tracks)
+    renderer = body["captions"]["playerCaptionsTracklistRenderer"]
+    renderer["audioTracks"] = [{"defaultCaptionTrackIndex": 0}]
+    renderer["defaultAudioTrackIndex"] = 0
+    respx.post(PLAYER_ENDPOINT).mock(return_value=httpx.Response(200, json=body))
+    russian = respx.get(TIMEDTEXT, params={"lang": "ru"}).mock(
+        return_value=httpx.Response(200, text=TRANSCRIPT_XML)
+    )
+
+    async with httpx.AsyncClient() as client:
+        markdown = await fetch_transcript(client, VIDEO, retries=0)
+
+    assert russian.call_count == 1
+    assert "Captions: Russian (auto-generated)" in markdown
+
+
 @pytest.mark.parametrize("audio_tracks", [None, [{"defaultCaptionTrackIndex": 5}]])
 @respx.mock
 async def test_fetch_transcript_without_asr_or_usable_default_takes_the_first_track(
