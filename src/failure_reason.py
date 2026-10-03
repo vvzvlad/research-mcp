@@ -34,6 +34,9 @@ RATE_LIMIT = "rate-limit"
 NO_CREDITS = "no-credits"
 ACCESS_DENIED = "access-denied"
 BOT_PROTECTION = "bot-protection"
+# The page itself does not exist (the site answered 404/410): unlike every
+# other category this is a fact about the url, not about the way we fetched it.
+NOT_FOUND = "not-found"
 TLS = "tls"
 DNS = "dns"
 NETWORK = "network"
@@ -46,6 +49,8 @@ _MAX_CHAIN = 6
 
 # "HTTP 429", "HTTP429", "http 402" — the code may sit anywhere in the message.
 _HTTP_STATUS = re.compile(r"http\s*(\d{3})", re.IGNORECASE)
+# The providers' wording for "the site answered that the page does not exist".
+_TARGET_GONE = re.compile(r"target page returned http\s*(404|410)", re.IGNORECASE)
 
 # What a failed name resolution says when it is not a socket.gaierror instance
 # (e.g. it was already flattened into a message).
@@ -58,7 +63,11 @@ def _chain(exc: BaseException) -> list[BaseException]:
     current: BaseException | None = exc
     while current is not None and len(chain) < _MAX_CHAIN:
         chain.append(current)
-        current = current.__cause__ or current.__context__
+        # `raise X from None` hides the context on purpose; honour that.
+        if current.__cause__ is not None or current.__suppress_context__:
+            current = current.__cause__
+        else:
+            current = current.__context__
     return chain
 
 
@@ -97,6 +106,12 @@ def _from_text(text: str) -> str:
         return NO_CREDITS
     if codes & {"401", "403"}:
         return ACCESS_DENIED
+    # Only wording about the TARGET page: a bare "client error (HTTP 404)" can
+    # be a provider's own API endpoint, and must not condemn the url.
+    # trafilatura / jina / firecrawl say "target page returned HTTP 404"; tavily
+    # says "404 page not found" (measured live).
+    if _TARGET_GONE.search(lowered) or "page not found" in lowered:
+        return NOT_FOUND
     # Checked before `empty`: crawl4ai says "empty markdown (bot protection?)",
     # and the bot-protection guess is the more useful of the two signals.
     if "bot protection" in lowered:

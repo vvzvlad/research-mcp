@@ -130,6 +130,23 @@ def test_read_status_line_format():
     )
 
 
+def test_read_status_line_flags_a_thin_fallback():
+    # The longest thin answer is served only as a last resort; the model must
+    # not take it for the whole page.
+    outcome = ReadOutcome(
+        markdown="# A short note",
+        provider="crawl4ai",
+        tried=["trafilatura", "jina", "crawl4ai"],
+        failures=[("trafilatura", "empty"), ("jina", "other"), ("crawl4ai", "empty")],
+        thin=True,
+        elapsed_ms=1900,
+    )
+    assert format_read_status(outcome) == (
+        "Статус чтения: crawl4ai (провайдеров испробовано: 3); текст короткий (14 симв.) — "
+        "возможно, это не вся страница; 1.9 с"
+    )
+
+
 def test_read_status_line_names_the_local_pdf_path():
     # The PDF branch runs no read provider at all, so "провайдеров испробовано: 0"
     # next to a named winner would read as a contradiction.

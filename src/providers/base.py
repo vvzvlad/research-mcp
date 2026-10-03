@@ -24,7 +24,14 @@ class ProviderError(Exception):
 
     Raised on hard failures (HTTP errors, empty/too-thin content, exhausted
     credits). The pipeline catches it and moves on to the next instance.
+    ``status`` is set only by ``request_with_retry``'s plain-4xx branch (not
+    402/429, not a credit-exhaustion 4xx, not 5xx) and is ``None`` otherwise —
+    enough for a caller to tell "the site said 404" from other errors.
     """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(slots=True)

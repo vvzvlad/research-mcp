@@ -26,8 +26,10 @@ a volume across restarts/image updates).
   non-http(s) schemes and urls resolving into private/loopback/link-local
   networks (entry check in `read` + httpx hook on every redirect hop);
   `ALLOW_PRIVATE_NETWORK` is the escape hatch.
-- `src/providers/<type>.py` — searxng/duckduckgo/brave/jina_search/serper/exa
-  (search); trafilatura/jina/crawl4ai/tavily/firecrawl (read). searxng,
+- `src/providers/<type>.py` — searxng/duckduckgo/brave/tavily_search/
+  firecrawl_search/jina_search/xmlriver_search/parallel_search/octen_search/
+  linkup_search/youcom_search/serper/exa (search);
+  trafilatura/jina/crawl4ai/tavily/firecrawl/brightdata (read). searxng,
   duckduckgo and brave self-throttle locally (one query per 45s / 45s / 1.1s) and
   SKIP — never sleep — when the slot is taken.
 - `duckduckgo` and `trafilatura` are the ZERO-CONFIG FLOOR: neither names an ENV
@@ -65,7 +67,7 @@ a volume across restarts/image updates).
   dropped, what broke and why, elapsed) — on results, on an empty result and on
   a failed read alike; only a url rejected by the SSRF guard has none.
 - `src/failure_reason.py` — pure `classify(exc)` → one failure category
-  (`timeout`/`rate-limit`/`no-credits`/`access-denied`/`bot-protection`/`tls`/
+  (`timeout`/`rate-limit`/`no-credits`/`access-denied`/`bot-protection`/`not-found`/`tls`/
   `dns`/`network`/`empty`/`other`); the pipeline tags every provider failure with
   one and `formatting` renders its Russian label.
 - `src/server.py` — `build_server()` with the 4 `@mcp.tool` definitions (whose
@@ -88,7 +90,8 @@ a volume across restarts/image updates).
 ## Proxy (per instance)
 - An external instance can route through a SOCKS5/HTTP proxy via `<INSTANCE>_PROXY`
   (`EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`, `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`,
-  `FIRECRAWL_PROXY`); internal instances (searxng/crawl4ai/trafilatura) have none.
+  `FIRECRAWL_PROXY`, `XMLRIVER_PROXY`, `PARALLEL_PROXY`, `OCTEN_PROXY`, `LINKUP_PROXY`,
+  `YOUCOM_PROXY`, `BRIGHTDATA_PROXY`); internal instances (searxng/crawl4ai/trafilatura) have none.
 - `YOUTUBE_PROXY`, `INSTAGRAM_PROXY` and `GROQ_PROXY` are the proxy vars outside
   `INSTANCES`: `Pipeline.build` reads them for the YouTube path and the two
   Instagram paths (`INSTAGRAM_PROXY` serves both the transcript and the

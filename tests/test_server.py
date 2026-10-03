@@ -20,9 +20,10 @@ class FakePipeline:
     truncation tests use to hand the tools a page longer than the budget.
     """
 
-    def __init__(self, markdown: str | None = None):
+    def __init__(self, markdown: str | None = None, thin: bool = False):
         self.closed = False
         self._markdown = markdown
+        self._thin = thin
         # Arguments of the last search / search_and_read call (the caps and the
         # over-fetch are computed in the tool, so this is where a test sees them).
         self.search_args: tuple | None = None
@@ -67,7 +68,7 @@ class FakePipeline:
             provider="jina",
             tried=["trafilatura", "jina"],
             failures=[("trafilatura", "empty")],
-            thin=False,
+            thin=self._thin,
             elapsed_ms=1500,
         )
 
@@ -83,6 +84,7 @@ class FakePipeline:
                 snippet="snip",
                 ok=True,
                 markdown=self._body("https://x.test"),
+                thin=self._thin,
             ),
             ReadItem(
                 title="Boom",
@@ -379,6 +381,21 @@ async def test_search_and_read_truncates_page_content(settings):
     out = await _call(srv, "search_and_read", {"query": "q", "num_results": 1})
     entry = _results(out)[0]
     assert entry["markdown"] == "A" * 50 + "\n\n[содержимое обрезано на 150 символах]"
+
+
+THIN_MARKER = "\n\n[текст короткий (7 симв.) — возможно, это не вся страница]"
+
+
+async def test_read_pages_marks_a_thin_fallback(settings):
+    srv = build_server(settings, pipeline=FakePipeline(markdown="# short", thin=True))
+    pages = _pages(await _call(srv, "read_pages", {"urls": ["https://a.test"]}))
+    assert pages[0]["markdown"] == "# short" + THIN_MARKER
+
+
+async def test_search_and_read_marks_a_thin_fallback(settings):
+    srv = build_server(settings, pipeline=FakePipeline(markdown="# short", thin=True))
+    out = await _call(srv, "search_and_read", {"query": "q", "num_results": 1})
+    assert _results(out)[0]["markdown"] == "# short" + THIN_MARKER
 
 
 # -- the combined tool ------------------------------------------------------

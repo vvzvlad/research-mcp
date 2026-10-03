@@ -108,7 +108,7 @@ async def request_with_retry(
             # without a retry.
             if _is_credit_exhaustion(response):
                 raise ProviderError(f"{provider}: out of credits (HTTP {status})")
-            raise ProviderError(f"{provider}: client error (HTTP {status})")
+            raise ProviderError(f"{provider}: client error (HTTP {status})", status=status)
         return response
 
     # Unreachable, but keep the type checker and callers honest.

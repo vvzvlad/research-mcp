@@ -26,6 +26,7 @@ _REASON_LABELS = {
     failure_reason.NO_CREDITS: "нет кредитов",
     failure_reason.ACCESS_DENIED: "отказ в доступе",
     failure_reason.BOT_PROTECTION: "бот-защита",
+    failure_reason.NOT_FOUND: "страница не существует",
     failure_reason.TLS: "TLS",
     failure_reason.DNS: "DNS",
     failure_reason.NETWORK: "сеть",
@@ -126,10 +127,25 @@ def format_read_status(outcome: ReadOutcome) -> str:
     """
     if not outcome.tried:
         return f"Статус чтения: {outcome.provider} (извлечено локально); {_seconds(outcome.elapsed_ms)}"
-    return (
-        f"Статус чтения: {outcome.provider} "
-        f"(провайдеров испробовано: {len(outcome.tried)}); {_seconds(outcome.elapsed_ms)}"
-    )
+    status = f"Статус чтения: {outcome.provider} (провайдеров испробовано: {len(outcome.tried)})"
+    if outcome.thin:
+        status += f"; {_thin_note(outcome.markdown)}"
+    return f"{status}; {_seconds(outcome.elapsed_ms)}"
+
+
+def _thin_note(markdown: str) -> str:
+    # A thin fallback is the longest of the short answers, served only because
+    # nothing fuller came back: it may be the whole (short) page, or not.
+    return f"текст короткий ({len(markdown)} симв.) — возможно, это не вся страница"
+
+
+def mark_thin(markdown: str) -> str:
+    """``markdown`` of a thin fallback plus a marker line, for the batch tools.
+
+    read_pages and search_and_read have no per-page status line, so the note
+    rides in the text on its own line, like ``truncate_markdown``'s marker.
+    """
+    return f"{markdown}\n\n[{_thin_note(markdown)}]"
 
 
 def format_read_failure_status(reason: str, tried: int) -> str:

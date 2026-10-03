@@ -131,7 +131,7 @@ class ReadItem:
     The search fields always carry the hit as the search returned it; the read
     fields are mutually exclusive — ``ok`` means ``markdown``, otherwise
     ``error`` (the message) and ``reason`` (a ``src.failure_reason`` constant,
-    for the caller to label).
+    for the caller to label). ``thin`` mirrors ``ReadOutcome.thin``.
     """
 
     title: str
@@ -141,6 +141,7 @@ class ReadItem:
     markdown: str | None = None
     error: str | None = None
     reason: str | None = None
+    thin: bool = False
 
 
 @dataclass(slots=True)
@@ -913,7 +914,11 @@ class Pipeline:
             errors.append(f"{provider.name}: content too thin ({len(content)} chars)")
             failures.append((provider.name, failure_reason.EMPTY))
 
-        if best_thin:
+        # A thin answer next to a provider that saw the site answer 404/410 is
+        # the site's error page (crawl4ai converts it without a status), not a
+        # short article: report the read as failed instead of serving it.
+        page_gone = any(reason == failure_reason.NOT_FOUND for _, reason in failures)
+        if best_thin and not page_gone:
             _log_ok(best_thin_name or "", suffix=" (thin fallback)")
             return ReadOutcome(
                 markdown=best_thin,
@@ -1103,6 +1108,7 @@ class Pipeline:
                         snippet=hit.snippet,
                         ok=True,
                         markdown=read.markdown,
+                        thin=read.thin,
                     )
             return ReadItem(
                 title=hit.title,
