@@ -65,7 +65,7 @@ a volume across restarts/image updates).
   dropped, what broke and why, elapsed) — on results, on an empty result and on
   a failed read alike; only a url rejected by the SSRF guard has none.
 - `src/failure_reason.py` — pure `classify(exc)` → one failure category
-  (`timeout`/`rate-limit`/`no-credits`/`access-denied`/`bot-protection`/`tls`/
+  (`timeout`/`rate-limit`/`no-credits`/`access-denied`/`bot-protection`/`not-found`/`tls`/
   `dns`/`network`/`empty`/`other`); the pipeline tags every provider failure with
   one and `formatting` renders its Russian label.
 - `src/server.py` — `build_server()` with the 4 `@mcp.tool` definitions (whose

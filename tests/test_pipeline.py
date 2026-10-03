@@ -11,6 +11,7 @@ import httpx
 import pytest
 import respx
 
+from src.failure_reason import NOT_FOUND, dominant_reason
 from src.formatting import format_search_results
 from src.pipeline import Pipeline, ReadFailed
 from src.providers.base import ProviderError
@@ -643,6 +644,58 @@ async def test_read_fallback_trafilatura_thin_jina_error_crawl4ai_ok(monkeypatch
     assert outcome.failures == [("trafilatura", "empty"), ("jina", "other")]
     assert outcome.thin is False
     assert outcome.elapsed_ms >= 0
+
+
+@respx.mock
+async def test_read_missing_page_fails_instead_of_serving_its_thin_error_page(
+    monkeypatch, settings
+):
+    # The site answers 404; crawl4ai converts the 404 page without a status and
+    # comes back thin. That thin text is the error page, not a short article.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("CRAWL4AI_URL", "http://crawl4ai.test")
+    monkeypatch.setenv("CRAWL4AI_TOKEN", "tok")
+    url = "https://gone.test/page"
+    respx.get(url).mock(return_value=httpx.Response(404, text="Not Found"))
+    respx.get(f"https://r.jina.ai/{url}").mock(
+        return_value=httpx.Response(
+            200,
+            text="Title: 404\n\nWarning: Target URL returned error 404: Not Found\n\n"
+            "Markdown Content:\n# 404",
+        )
+    )
+    respx.post("http://crawl4ai.test/md").mock(
+        return_value=httpx.Response(200, json={"markdown": "# 404 Not found", "success": True})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ReadFailed) as excinfo:
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    assert dominant_reason(excinfo.value.failures) == NOT_FOUND
+
+
+@respx.mock
+async def test_read_thin_page_is_still_served_when_no_one_saw_a_404(monkeypatch, settings):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("CRAWL4AI_URL", "http://crawl4ai.test")
+    monkeypatch.setenv("CRAWL4AI_TOKEN", "tok")
+    url = "https://short.test/page"
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(500))
+    respx.post("http://crawl4ai.test/md").mock(
+        return_value=httpx.Response(200, json={"markdown": "# A short note", "success": True})
+    )
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    assert outcome.thin is True
 
 
 @respx.mock

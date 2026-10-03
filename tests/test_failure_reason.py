@@ -18,6 +18,7 @@ from src.failure_reason import (
     EMPTY,
     NETWORK,
     NO_CREDITS,
+    NOT_FOUND,
     OTHER,
     RATE_LIMIT,
     TIMEOUT,
@@ -76,6 +77,18 @@ def test_other_transport_errors_are_network():
     assert classify(_wrapped("jina: transport error", httpx.ConnectError("reset"))) == NETWORK
 
 
+def test_suppressed_context_is_not_followed():
+    # `raise X from None` hides the context on purpose: the timeout behind it
+    # must not decide the category.
+    try:
+        try:
+            raise httpx.ReadTimeout("timed out")
+        except httpx.ReadTimeout:
+            raise ProviderError("jina: target page returned HTTP 403") from None
+    except ProviderError as exc:
+        assert classify(exc) == ACCESS_DENIED
+
+
 def test_chain_walk_is_bounded():
     # Deeper than the bound → the timeout at the bottom is not found (and the
     # classifier still answers instead of looping).
@@ -98,6 +111,11 @@ def test_chain_walk_is_bounded():
         # The site's refusal jina reports behind a 200.
         ("jina: target page returned HTTP 403", ACCESS_DENIED),
         ("jina: bot protection (CAPTCHA wall)", BOT_PROTECTION),
+        # The page does not exist, in each provider's wording.
+        ("trafilatura: client error (HTTP 404)", NOT_FOUND),
+        ("jina: target page returned HTTP 410", NOT_FOUND),
+        ("firecrawl: target page returned HTTP 404", NOT_FOUND),
+        ("tavily-1: 404 page not found", NOT_FOUND),
         ("crawl4ai: empty markdown (bot protection?)", BOT_PROTECTION),
         ("firecrawl: empty markdown", EMPTY),
         ("trafilatura: no main content extracted", EMPTY),

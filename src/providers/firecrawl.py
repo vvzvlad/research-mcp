@@ -3,7 +3,7 @@
 API (verified 2026-06, v2): POST ``https://api.firecrawl.dev/v2/scrape`` with
 header ``Authorization: Bearer {key}`` and body
 ``{"url": url, "formats": ["markdown"], "proxy": "auto"}`` →
-``{"success": true, "data": {"markdown": "..."}}``.
+``{"success": true, "data": {"markdown": "...", "metadata": {"statusCode": 200}}}``.
 """
 
 from __future__ import annotations
@@ -44,6 +44,13 @@ class FirecrawlRead:
         except ValueError as exc:
             raise ProviderError(f"{self.name}: invalid JSON response") from exc
         payload = data.get("data") if isinstance(data, dict) else None
+        # Firecrawl answers 200 and converts the site's error page as if it were
+        # the article; only data.metadata.statusCode tells (measured live: 404
+        # on a missing page, 200 on pages it got through a bot wall).
+        metadata = payload.get("metadata") if isinstance(payload, dict) else None
+        status = metadata.get("statusCode") if isinstance(metadata, dict) else None
+        if isinstance(status, int) and status >= 400:
+            raise ProviderError(f"{self.name}: target page returned HTTP {status}")
         markdown = payload.get("markdown") if isinstance(payload, dict) else None
         if not isinstance(markdown, str) or not markdown.strip():
             raise ProviderError(f"{self.name}: empty markdown")
