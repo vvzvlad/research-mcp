@@ -503,3 +503,94 @@ async def test_keyless_pdf_never_escalates(make_config):
         out = await provider.read(client, PDF_URL)
     assert out == THIN_TEXT.strip()
     assert route.call_count == 1
+
+
+# -- the site's refusal behind a 200 ---------------------------------------
+# jina answers 200 and flags the refusal only in a "Warning:" header line; the
+# pages below are longer than fallback_min_chars, so length alone accepts them.
+
+
+def _jina_page(warning: str, body: str) -> str:
+    return (
+        f"Title: Blocked\n\nURL Source: {URL}\n\n{warning}\n\n"
+        f"Markdown Content:\n{body * 40}"
+    )
+
+
+CAPTCHA_PAGE = _jina_page(
+    "Warning: This page maybe requiring CAPTCHA, please make sure you are "
+    "authorized to access this page.",
+    "Complete the security check before continuing. ",
+)
+
+
+def _target_error_page(code: int) -> str:
+    return _jina_page(
+        f"Warning: Target URL returned error {code}: Refused", "Access denied. "
+    )
+
+
+@respx.mock
+async def test_captcha_wall_fails_without_escalation(make_config):
+    route = respx.get(READER_URL).mock(return_value=httpx.Response(200, text=CAPTCHA_PAGE))
+    provider = JinaRead(make_config("jina", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.read(client, URL)
+    assert "bot protection" in str(excinfo.value)
+    assert route.call_count == 1  # the residential exit does not break challenges
+
+
+@respx.mock
+async def test_missing_page_fails_without_escalation(make_config):
+    route = respx.get(READER_URL).mock(
+        return_value=httpx.Response(200, text=_target_error_page(404))
+    )
+    provider = JinaRead(make_config("jina", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.read(client, URL)
+    assert "HTTP 404" in str(excinfo.value)
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_blocked_page_climbs_the_ladder_and_skips_refused_steps(make_config):
+    route = respx.get(READER_URL)
+    route.side_effect = [
+        httpx.Response(200, text=_target_error_page(403)),
+        httpx.Response(200, text=_target_error_page(403)),
+        httpx.Response(200, text=FULL_TEXT),
+    ]
+    provider = JinaRead(make_config("jina", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        out = await provider.read(client, URL)
+    assert out == FULL_TEXT.strip()
+    assert route.call_count == 3  # plain → readerlm-v2 → residential proxy
+
+
+@respx.mock
+async def test_blocked_on_every_step_fails_with_the_target_status(make_config):
+    route = respx.get(READER_URL).mock(
+        return_value=httpx.Response(200, text=_target_error_page(403))
+    )
+    provider = JinaRead(make_config("jina", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.read(client, URL)
+    assert "HTTP 403" in str(excinfo.value)
+    assert route.call_count == 3  # non-pdf: no OCR step
+
+
+@respx.mock
+async def test_warning_quoted_in_the_article_body_is_not_a_refusal(make_config):
+    page = (
+        f"Title: Jina notes\n\nURL Source: {URL}\n\nMarkdown Content:\n"
+        "Warning: Target URL returned error 404: quoted in a how-to.\n\n" + FULL_TEXT
+    )
+    route = respx.get(READER_URL).mock(return_value=httpx.Response(200, text=page))
+    provider = JinaRead(make_config("jina", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        out = await provider.read(client, URL)
+    assert out == page.strip()
+    assert route.call_count == 1

@@ -26,6 +26,7 @@ for what each step buys and what it costs.
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlsplit
 
 import httpx
@@ -80,6 +81,33 @@ _ESCALATIONS: tuple[tuple[str, dict[str, str], bool], ...] = (
 )
 
 
+# jina answers 200 even when the site refused it: the refusal shows up only as
+# a "Warning:" line in the header block above "Markdown Content:", and the
+# refusal page itself is converted below it as if it were the article (seen
+# live on a CAPTCHA wall, a Cloudflare check and a 404).
+_TARGET_ERROR = re.compile(r"^Warning: Target URL returned error (\d{3})", re.MULTILINE)
+_CAPTCHA_WARNING = "Warning: This page maybe requiring CAPTCHA"
+# Target statuses no escalation step can change: the page does not exist.
+_GONE = {"404", "410"}
+
+
+def _refusal(text: str) -> tuple[str, bool] | None:
+    """Why ``text`` is the site's refusal rather than the page, or None.
+
+    Only the header block is looked at, so an article that merely quotes such a
+    line is not mistaken for a refusal. The bool is True when no escalation
+    step can cure it: a CAPTCHA wall (the residential exit does not break
+    challenges, see ``_ESCALATIONS``) or a page that does not exist.
+    """
+    head = text.split("Markdown Content:", 1)[0]
+    if _CAPTCHA_WARNING in head:
+        return "bot protection (CAPTCHA wall)", True
+    match = _TARGET_ERROR.search(head)
+    if match:
+        return f"target page returned HTTP {match.group(1)}", match.group(1) in _GONE
+    return None
+
+
 def _is_pdf_url(url: str) -> bool:
     """True when the url's PATH ends in ``.pdf``, case-insensitively.
 
@@ -120,6 +148,16 @@ class JinaRead:
             headers=headers,
         )
         text = response.text.strip()
+        reason = None
+        refusal = _refusal(text)
+        if refusal:
+            reason, final = refusal
+            if final:
+                raise ProviderError(f"{self.name}: {reason}")
+            # Any other refusal (403, 5xx, ...) is no text at all, however long
+            # the refusal page: it climbs the ladder like an empty answer, where
+            # the residential step may cure a block by IP reputation.
+            text = ""
         # Good enough → done, no second (3x-priced) request. The explicit
         # `text and` guard matters when fallback_min_chars=0: a length check
         # alone would accept "" as success and bypass the final empty-guard —
@@ -181,10 +219,13 @@ class JinaRead:
                 # undercounts that rare case.
                 logger.info("{}: {} for url={}", self.name, label, url)
                 retry_text = retry_response.text.strip()
+                # A refused step brought no text, however long its page.
+                if _refusal(retry_text):
+                    retry_text = ""
                 # Longest wins: any tier can come back thin (or empty), so keep
                 # whichever extracted more.
                 if len(retry_text) > len(text):
                     text = retry_text
         if not text:
-            raise ProviderError(f"{self.name}: empty response")
+            raise ProviderError(f"{self.name}: {reason or 'empty response'}")
         return text
