@@ -679,23 +679,26 @@ async def test_read_missing_page_fails_instead_of_serving_its_thin_error_page(
 
 
 @respx.mock
-async def test_read_thin_page_is_still_served_when_no_one_saw_a_404(monkeypatch, settings):
+async def test_read_thin_page_survives_a_404_from_a_provider_api(monkeypatch, settings):
+    # crawl4ai's OWN endpoint answers 404 (a wrong CRAWL4AI_URL): that says
+    # nothing about the page, so jina's short text is still served.
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
     monkeypatch.setenv("CRAWL4AI_URL", "http://crawl4ai.test")
     monkeypatch.setenv("CRAWL4AI_TOKEN", "tok")
     url = "https://short.test/page"
     respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
-    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(500))
-    respx.post("http://crawl4ai.test/md").mock(
-        return_value=httpx.Response(200, json={"markdown": "# A short note", "success": True})
+    respx.get(f"https://r.jina.ai/{url}").mock(
+        return_value=httpx.Response(200, text="# A short note")
     )
+    respx.post("http://crawl4ai.test/md").mock(return_value=httpx.Response(404))
     pipe = Pipeline.build(settings)
     try:
         outcome = await pipe.read(url)
     finally:
         await pipe.aclose()
     assert outcome.thin is True
+    assert outcome.provider == "jina"
 
 
 @respx.mock

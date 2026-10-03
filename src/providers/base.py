@@ -24,7 +24,13 @@ class ProviderError(Exception):
 
     Raised on hard failures (HTTP errors, empty/too-thin content, exhausted
     credits). The pipeline catches it and moves on to the next instance.
+    ``status`` is the HTTP status of the provider's own request when that is
+    what failed, so a caller can tell "the site said 404" from other errors.
     """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(slots=True)

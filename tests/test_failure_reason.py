@@ -112,8 +112,10 @@ def test_chain_walk_is_bounded():
         ("jina: target page returned HTTP 403", ACCESS_DENIED),
         ("jina: bot protection (CAPTCHA wall)", BOT_PROTECTION),
         # The page does not exist, in each provider's wording.
-        ("trafilatura: client error (HTTP 404)", NOT_FOUND),
+        ("trafilatura: target page returned HTTP 404", NOT_FOUND),
         ("jina: target page returned HTTP 410", NOT_FOUND),
+        # A provider's OWN endpoint answering 404 says nothing about the page.
+        ("crawl4ai: client error (HTTP 404)", OTHER),
         ("firecrawl: target page returned HTTP 404", NOT_FOUND),
         ("tavily-1: 404 page not found", NOT_FOUND),
         ("crawl4ai: empty markdown (bot protection?)", BOT_PROTECTION),

@@ -37,6 +37,17 @@ async def test_page_the_site_answered_404_is_a_failed_read(make_config):
 
 
 @respx.mock
+async def test_answer_without_a_status_is_returned(make_config):
+    respx.post(FIRECRAWL_SCRAPE_ENDPOINT).mock(
+        return_value=httpx.Response(200, json={"success": True, "data": {"markdown": FULL_TEXT}})
+    )
+    provider = FirecrawlRead(make_config("firecrawl", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        out = await provider.read(client, URL)
+    assert out == FULL_TEXT.strip()
+
+
+@respx.mock
 async def test_page_the_site_answered_200_is_returned(make_config):
     respx.post(FIRECRAWL_SCRAPE_ENDPOINT).mock(return_value=_scrape(FULL_TEXT, 200))
     provider = FirecrawlRead(make_config("firecrawl", api_key="k"))

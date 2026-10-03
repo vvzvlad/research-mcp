@@ -51,14 +51,23 @@ class TrafilaturaRead:
         self._config = config
 
     async def read(self, client: httpx.AsyncClient, url: str) -> str:
-        response = await request_with_retry(
-            client,
-            "GET",
-            url,
-            retries=self._config.retries,
-            provider=self.name,
-            headers={"User-Agent": BROWSER_USER_AGENT},
-        )
+        try:
+            response = await request_with_retry(
+                client,
+                "GET",
+                url,
+                retries=self._config.retries,
+                provider=self.name,
+                headers={"User-Agent": BROWSER_USER_AGENT},
+            )
+        except ProviderError as exc:
+            # This request IS the page, so its 404/410 is the page saying it
+            # does not exist — worded like the other providers' target errors.
+            if exc.status in (404, 410):
+                raise ProviderError(
+                    f"{self.name}: target page returned HTTP {exc.status}"
+                ) from exc
+            raise
         extracted = extract_markdown(response.text)
         if not extracted:
             raise ProviderError(f"{self.name}: no main content extracted")

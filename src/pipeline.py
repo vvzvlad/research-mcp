@@ -131,7 +131,7 @@ class ReadItem:
     The search fields always carry the hit as the search returned it; the read
     fields are mutually exclusive — ``ok`` means ``markdown``, otherwise
     ``error`` (the message) and ``reason`` (a ``src.failure_reason`` constant,
-    for the caller to label).
+    for the caller to label). ``thin`` mirrors ``ReadOutcome.thin``.
     """
 
     title: str
@@ -141,6 +141,7 @@ class ReadItem:
     markdown: str | None = None
     error: str | None = None
     reason: str | None = None
+    thin: bool = False
 
 
 @dataclass(slots=True)
@@ -1107,6 +1108,7 @@ class Pipeline:
                         snippet=hit.snippet,
                         ok=True,
                         markdown=read.markdown,
+                        thin=read.thin,
                     )
             return ReadItem(
                 title=hit.title,

@@ -129,13 +129,23 @@ def format_read_status(outcome: ReadOutcome) -> str:
         return f"Статус чтения: {outcome.provider} (извлечено локально); {_seconds(outcome.elapsed_ms)}"
     status = f"Статус чтения: {outcome.provider} (провайдеров испробовано: {len(outcome.tried)})"
     if outcome.thin:
-        # The longest of the thin answers, served only because nothing fuller
-        # came back: the model must not take it for the whole page.
-        status += (
-            f"; текст короткий ({len(outcome.markdown)} симв.) — "
-            "полную страницу не получил ни один провайдер"
-        )
+        status += f"; {_thin_note(outcome.markdown)}"
     return f"{status}; {_seconds(outcome.elapsed_ms)}"
+
+
+def _thin_note(markdown: str) -> str:
+    # A thin fallback is the longest of the short answers, served only because
+    # nothing fuller came back: it may be the whole (short) page, or not.
+    return f"текст короткий ({len(markdown)} симв.) — возможно, это не вся страница"
+
+
+def mark_thin(markdown: str) -> str:
+    """``markdown`` of a thin fallback plus a marker line, for the batch tools.
+
+    read_pages and search_and_read have no per-page status line, so the note
+    rides in the text on its own line, like ``truncate_markdown``'s marker.
+    """
+    return f"{markdown}\n\n[{_thin_note(markdown)}]"
 
 
 def format_read_failure_status(reason: str, tried: int) -> str:
