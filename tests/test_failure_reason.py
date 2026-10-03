@@ -95,6 +95,9 @@ def test_chain_walk_is_bounded():
         ("tavily-2: out of credits (HTTP 402)", NO_CREDITS),
         ("jina: client error (HTTP 403)", ACCESS_DENIED),
         ("jina: client error (HTTP 401)", ACCESS_DENIED),
+        # The site's refusal jina reports behind a 200.
+        ("jina: target page returned HTTP 403", ACCESS_DENIED),
+        ("jina: bot protection (CAPTCHA wall)", BOT_PROTECTION),
         ("crawl4ai: empty markdown (bot protection?)", BOT_PROTECTION),
         ("firecrawl: empty markdown", EMPTY),
         ("trafilatura: no main content extracted", EMPTY),

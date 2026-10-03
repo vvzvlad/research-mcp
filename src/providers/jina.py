@@ -21,11 +21,14 @@ API (verified 2026-08-18 from https://docs.jina.ai/): GET
 The last four form the keyed-only ESCALATION LADDER in ``read``: the cheap plain
 conversion goes first, and only a thin/empty answer climbs the ladder, one step
 at a time, stopping as soon as a step returns enough text. See ``_ESCALATIONS``
-for what each step buys and what it costs.
+for what each step buys and what it costs. A site's refusal behind a 200 (see
+``_refusal``) skips the parsing-only step and stops after the residential exit;
+a CAPTCHA or a missing page stops at once.
 """
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlsplit
 
 import httpx
@@ -80,6 +83,33 @@ _ESCALATIONS: tuple[tuple[str, dict[str, str], bool], ...] = (
 )
 
 
+# jina answers 200 even when the site refused it: the refusal shows up only as
+# a "Warning:" line in the header block above "Markdown Content:", and the
+# refusal page itself is converted below it as if it were the article (seen
+# live on a CAPTCHA wall, a Cloudflare check and a 404).
+_TARGET_ERROR = re.compile(r"^Warning: Target URL returned error (\d{3})", re.MULTILINE)
+_CAPTCHA_WARNING = "Warning: This page maybe requiring CAPTCHA"
+# Target statuses no escalation step can change: the page does not exist.
+_GONE = {"404", "410"}
+
+
+def _refusal(text: str) -> tuple[str, bool] | None:
+    """Why ``text`` is the site's refusal rather than the page, or None.
+
+    Only the header block is looked at, so an article that merely quotes such a
+    line is not mistaken for a refusal. The bool is True when no escalation
+    step can cure it: a CAPTCHA wall (the residential exit does not break
+    challenges, see ``_ESCALATIONS``) or a page that does not exist.
+    """
+    head = text.split("Markdown Content:", 1)[0]
+    if _CAPTCHA_WARNING in head:
+        return "bot protection (CAPTCHA wall)", True
+    match = _TARGET_ERROR.search(head)
+    if match:
+        return f"target page returned HTTP {match.group(1)}", match.group(1) in _GONE
+    return None
+
+
 def _is_pdf_url(url: str) -> bool:
     """True when the url's PATH ends in ``.pdf``, case-insensitively.
 
@@ -108,9 +138,10 @@ class JinaRead:
             if budget > 0:
                 headers["X-Token-Budget"] = str(budget)
         # First attempt: the plain (cheap) markdown conversion. An HTTP-level
-        # failure here propagates as ProviderError WITHOUT the escalations
-        # below: an upstream 4xx means the site refused jina's fetch, and the
-        # heavy tiers fix parsing, not access.
+        # failure of jina itself here propagates as ProviderError WITHOUT the
+        # escalations below: the heavy tiers fix parsing, not jina's own
+        # errors. A site's refusal behind a 200 is a different case — see
+        # _refusal and the residential step below.
         response = await request_with_retry(
             client,
             "GET",
@@ -120,6 +151,16 @@ class JinaRead:
             headers=headers,
         )
         text = response.text.strip()
+        reason = None
+        refusal = _refusal(text)
+        if refusal:
+            reason, final = refusal
+            if final:
+                raise ProviderError(f"{self.name}: {reason}")
+            # Any other refusal (403, 5xx, ...) is no text at all, however long
+            # the refusal page: it climbs the ladder like an empty answer, where
+            # the residential step may cure a block by IP reputation.
+            text = ""
         # Good enough → done, no second (3x-priced) request. The explicit
         # `text and` guard matters when fallback_min_chars=0: a length check
         # alone would accept "" as success and bypass the final empty-guard —
@@ -140,6 +181,10 @@ class JinaRead:
                 if text and len(text) >= self._config.fallback_min_chars:
                     break
                 if pdf_only and not _is_pdf_url(url):
+                    continue
+                # After a refusal only a step on a different exit (x-proxy) can
+                # get past it; a parsing-only step would just be refused again.
+                if reason and "x-proxy" not in extra_headers:
                     continue
                 try:
                     retry_response = await request_with_retry(
@@ -164,7 +209,13 @@ class JinaRead:
                     # the next (dearer) step.
                     if text:
                         return text
-                    raise
+                    if reason is None:
+                        raise
+                    # Report the refusal, not this step's failure. The raise
+                    # happens below, outside this except: classify() follows
+                    # __context__, so raising here would still read as the
+                    # step's timeout.
+                    break
                 # One successful read() can mean SEVERAL billed 200s (each of
                 # these above plain price) while the pipeline accounts a single
                 # provider name. Each step logs its own line, and only after its
@@ -174,17 +225,28 @@ class JinaRead:
                 # client-side timeout on a request the server already processed
                 # and billed (see the billed.append comment in Pipeline.read).
                 # One caveat: a line is also emitted when the read() still fails
-                # afterwards — the step returned 200 but every tier was empty,
-                # so the empty-guard below raises ProviderError — and then jina
-                # contributes no entry to the pipeline's `billed` at all, so
-                # reconstructing spend as paid_calls + these log lines
-                # undercounts that rare case.
+                # afterwards — the step returned 200 but every tier was empty
+                # or refused, so the guard below raises ProviderError — and then
+                # jina contributes no entry to the pipeline's `billed` at all,
+                # so reconstructing spend as paid_calls + these log lines
+                # undercounts that case. A refusal on the plain attempt raises
+                # before any line, leaving its one billed call uncounted too.
                 logger.info("{}: {} for url={}", self.name, label, url)
                 retry_text = retry_response.text.strip()
+                step_refusal = _refusal(retry_text)
+                if step_refusal:
+                    # A refused step brought no text, however long its page.
+                    reason, final = step_refusal
+                    retry_text = ""
+                    # Nothing further down the ladder gets past a CAPTCHA, a
+                    # missing page, or a refusal on the residential exit itself
+                    # (the OCR step uses that same exit).
+                    if final or "x-proxy" in extra_headers:
+                        break
                 # Longest wins: any tier can come back thin (or empty), so keep
                 # whichever extracted more.
                 if len(retry_text) > len(text):
                     text = retry_text
         if not text:
-            raise ProviderError(f"{self.name}: empty response")
+            raise ProviderError(f"{self.name}: {reason or 'empty response'}")
         return text
