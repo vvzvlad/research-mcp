@@ -21,7 +21,9 @@ API (verified 2026-08-18 from https://docs.jina.ai/): GET
 The last four form the keyed-only ESCALATION LADDER in ``read``: the cheap plain
 conversion goes first, and only a thin/empty answer climbs the ladder, one step
 at a time, stopping as soon as a step returns enough text. See ``_ESCALATIONS``
-for what each step buys and what it costs.
+for what each step buys and what it costs. A site's refusal behind a 200 (see
+``_refusal``) skips the parsing-only step and stops after the residential exit;
+a CAPTCHA or a missing page stops at once.
 """
 
 from __future__ import annotations

@@ -8,6 +8,9 @@ stops as soon as a step returns enough text —
 2. the same plus ``x-proxy: auto``, jina's residential pool (5x),
 3. ``X-Respond-With: jina-ocr-v1`` in place of readerlm-v2 (40x), .pdf ONLY.
 
+A site's refusal behind a 200 skips the parsing-only step and stops after the
+residential exit; a CAPTCHA or a missing page stops at once.
+
 The longest text of all attempts wins; a step that fails stops the ladder; each
 step logs its own accounting line, and only after a 200; keyless mode never
 escalates (every step is billed). Every test pins ``route.call_count``: without
@@ -587,9 +590,11 @@ async def test_blocked_pdf_on_the_residential_exit_never_buys_ocr(make_config):
 @respx.mock
 async def test_refusal_survives_a_failing_residential_step(make_config):
     route = respx.get(READER_URL)
+    # A timeout, not a 5xx: raised inside the except, the refusal would carry
+    # the timeout in __context__ and classify() would answer "timeout".
     route.side_effect = [
         httpx.Response(200, text=_target_error_page(403)),
-        httpx.Response(500),
+        httpx.ReadTimeout("timed out"),
     ]
     provider = JinaRead(make_config("jina", api_key="k"))
     async with httpx.AsyncClient() as client:
@@ -598,6 +603,23 @@ async def test_refusal_survives_a_failing_residential_step(make_config):
     assert "HTTP 403" in str(excinfo.value)
     assert classify(excinfo.value) == ACCESS_DENIED
     assert route.call_count == 2
+
+
+@respx.mock
+async def test_captcha_on_a_parsing_step_stops_before_the_residential_exit(
+    make_config,
+):
+    route = respx.get(READER_URL)
+    route.side_effect = [
+        httpx.Response(200, text=""),
+        httpx.Response(200, text=CAPTCHA_PAGE),
+    ]
+    provider = JinaRead(make_config("jina", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.read(client, URL)
+    assert classify(excinfo.value) == BOT_PROTECTION
+    assert route.call_count == 2  # plain → readerlm-v2; no 5x residential step
 
 
 @respx.mock
