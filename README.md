@@ -107,6 +107,22 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   from the single auto-generated track on a plain one.
   A video without captions, or a fetch that fails, falls through to the normal
   chain above.
+  An **Instagram video url** (`instagram.com/reel/…`, `/reels/…`, `/p/…`,
+  `/tv/…`, and `/<username>/reel/…`, `/<username>/p/…`) is answered the same way, with a
+  **transcript of its audio** — author, caption and the speech as timestamped
+  paragraphs. The post comes from one anonymous request to Instagram's web
+  GraphQL API (the logged-out query `yt-dlp` uses); Groq Whisper
+  (`whisper-large-v3-turbo`) fetches the post's audio-only DASH track by url and
+  transcribes it, so the server never downloads the media itself. Enabled by
+  `GROQ_API_KEY`; without it, or when the post is private, login-gated or has no
+  video, the url falls through to the normal chain.
+  An **Instagram profile url** (`instagram.com/<username>/`) is answered with the
+  profile's **posts**, 12 at a time, from the same anonymous GraphQL API (the
+  logged-out profile posts query): per post its date, kind (reel / video /
+  carousel / photo), link and caption; a reel or video link can be read again
+  for its transcript (with `GROQ_API_KEY`). A last line `Next page: …/<username>/?after=<cursor>` points to
+  the next 12 — reading that url continues the list. Needs no key. Hashtag pages
+  are not covered: Instagram serves them only to a logged-in account.
 
 Cross-cutting: one transient retry (5xx / transport errors) with a short backoff;
 **402 (out of credits) / 429 (rate limited) are treated as a provider failure →
@@ -169,7 +185,8 @@ of one shared monthly pool. Search runs on every query and will drain that pool
 well before the readers do; when it runs out, both halves stop working.
 Keyless until registered: `XMLRIVER_USER_ID` + `XMLRIVER_API_KEY` (Yandex SERP),
 `PARALLEL_API_KEY`, `OCTEN_API_KEY`, `LINKUP_API_KEY`, `YOUCOM_API_KEY`, and
-`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`.
+`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `GROQ_API_KEY` is not an instance: it
+turns on the Instagram transcript path of the read pipeline.
 
 ## Proxy
 
@@ -187,6 +204,12 @@ pipeline above). Where youtube.com is blocked — or the egress IP is flagged as
 bot, which YouTube answers with "Sign in to confirm you're not a bot" — transcripts
 work only through it.
 
+`INSTAGRAM_PROXY` routes every request to instagram.com — the reel transcript
+path and the profile post list alike (the latter needs no `GROQ_API_KEY`).
+`GROQ_PROXY` routes the transcription call to api.groq.com. Where Instagram is
+blocked, or Groq answers `Forbidden` for the egress country, that leg works only
+through its proxy.
+
 The value is passed straight to httpx; `socks5://host:port` does **proxy-side
 DNS** (the target hostname is resolved by the proxy, like `curl
 --socks5-hostname`), and `socks5h://` / `http://host:port` are also accepted.
@@ -203,7 +226,7 @@ server writes a **persistent log file** to `data/research-mcp.log` (default;
 so it survives container restarts and image updates. The file carries one
 **per-request line** per tool call — search (`query`, which provider instances
 actually ran, result count, latency) and read (`url`, the winning provider/tier
-or `pdf`/`youtube`, `ok`, latency), plus a `read_pages count=N ok=K` summary — making it
+or `pdf`/`youtube`/`instagram`, `ok`, latency), plus a `read_pages count=N ok=K` summary — making it
 useful for analyzing how requests distribute across provider tiers. No request
 bodies or secrets are logged, only urls/queries, provider names, counts, timings.
 
@@ -224,6 +247,7 @@ the log file across updates) — we never build on prod.
 | `src/providers/<type>.py` | One module per provider type. |
 | `src/providers/pdf.py` | PDF detection + pypdf text extraction (used by the pipeline). |
 | `src/providers/youtube.py` | YouTube video-url detection + transcript fetch (used by the pipeline). |
+| `src/providers/instagram.py` | Instagram url detection: post → audio transcript via Groq Whisper, profile → its posts with paging (used by the pipeline). |
 | `src/pipeline_config.py` | In-code instances + pipeline order. |
 | `src/pipeline.py` | Instance loader + search/read logic (and `search_and_read`, their composition). |
 | `src/rerank.py` | `JinaReranker` — post-merge rerank of search results. |
