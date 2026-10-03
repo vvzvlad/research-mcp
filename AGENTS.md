@@ -47,7 +47,10 @@ a volume across restarts/image updates).
   answers JSON only with the `Sec-Fetch-*` headers), then Groq Whisper
   transcribes the audio-only DASH track by url. Used by `Pipeline.read` after the
   YouTube step, only when `GROQ_API_KEY` is set; a failure falls through to the
-  read chain. Routed via `INSTAGRAM_PROXY` / `GROQ_PROXY`.
+  read chain. Routed via `INSTAGRAM_PROXY` / `GROQ_PROXY`. A profile url
+  (`instagram.com/<username>/`) is answered with its posts, 12 per page, via the
+  logged-out profile posts query (no key, not billed); the `?after=<cursor>`
+  url in the answer's last line is the next page.
 - `src/pipeline_config.py` — `INSTANCES`, `SEARCH_PIPELINE`, `READ_PIPELINE`.
 - `src/pipeline.py` — instance loader, `ClientManager` (one httpx client per
   proxy URL), search (merge/dedup/rerank) and read (fallback) logic, plus
@@ -87,8 +90,9 @@ a volume across restarts/image updates).
   (`EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`, `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`,
   `FIRECRAWL_PROXY`); internal instances (searxng/crawl4ai/trafilatura) have none.
 - `YOUTUBE_PROXY`, `INSTAGRAM_PROXY` and `GROQ_PROXY` are the proxy vars outside
-  `INSTANCES`: `Pipeline.build` reads them for the YouTube and Instagram
-  transcript paths, like `JINA_PROXY` for the reranker.
+  `INSTANCES`: `Pipeline.build` reads them for the YouTube path and the two
+  Instagram paths (`INSTAGRAM_PROXY` serves both the transcript and the
+  keyless profile listing), like `JINA_PROXY` for the reranker.
 - `Instance.proxy_env` holds the ENV var NAME (never a value); the loader resolves
   it into `ProviderConfig.proxy`, exposed as `provider.proxy`.
 - `ClientManager.client_for(proxy)` lazily creates/caches one httpx client per

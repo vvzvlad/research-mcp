@@ -1,4 +1,4 @@
-"""Instagram reel transcripts: the post via Instagram's GraphQL, the audio via Groq.
+"""Instagram via its logged-out GraphQL: reel transcripts (audio via Groq) and profile post lists.
 
 Not a registered provider — like ``youtube.py`` it is invoked directly by the
 read pipeline: ``Pipeline.read`` asks ``shortcode`` whether a url is an
@@ -14,14 +14,20 @@ login wall; the speech lives behind two calls:
 
 The result is rendered as Markdown: author, duration, language, the caption and
 the transcript cut into timestamped paragraphs.
+
+A profile url is the other path: ``profile`` recognises it and
+``fetch_profile_posts`` lists one page of the profile's posts through the same
+GraphQL endpoint (the logged-out profile posts query) — date, kind, url and
+caption per post, plus the url of the next page. No Groq call is involved.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import re
 import secrets
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -37,6 +43,13 @@ GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
 _APP_ID = "936619743392459"
 _FRIENDLY_NAME = "PolarisLoggedOutDesktopWWWPostRootContentQuery"
 _DOC_ID = "27130156389949648"
+# The logged-out profile posts tab query: one page of a profile's posts.
+_PROFILE_FRIENDLY_NAME = "PolarisLoggedOutDesktopWWWProfilePostsTabContentQuery"
+_PROFILE_DOC_ID = "27553725110923321"
+_PROFILE_PAGE_SIZE = 12
+
+# A media pk is a snowflake id: milliseconds since this epoch, shifted left 23 bits.
+_PK_EPOCH_MS = 1314220021721
 
 _WHISPER_MODEL = "whisper-large-v3-turbo"
 
@@ -48,6 +61,7 @@ _GROQ_PROVIDER = "groq"
 # A shortcode is the media id written in url-safe base64 with this alphabet.
 _ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _SHORTCODE = re.compile(r"[A-Za-z0-9_-]+")
+_USERNAME = re.compile(r"[A-Za-z0-9._]{1,30}")
 
 _INSTAGRAM_HOSTS = frozenset({"instagram.com", "www.instagram.com", "m.instagram.com"})
 # /p/ID, /reel/ID, /reels/ID, /tv/ID ...
@@ -81,6 +95,75 @@ def shortcode(url: str) -> str | None:
     else:
         return None
     return candidate if _SHORTCODE.fullmatch(candidate) else None
+
+
+def profile(url: str) -> tuple[str, str | None] | None:
+    """The ``(username, cursor)`` of an Instagram profile url, or ``None``.
+
+    Recognises the same hosts as ``shortcode`` with a path of exactly one
+    segment that is a valid username (``/<username>`` or ``/<username>/``);
+    ``cursor`` is the ``after`` query parameter, ``None`` when absent. Anything
+    else is ``None``; this never raises.
+    """
+    try:
+        parts = urlsplit(url.strip())
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return None
+    if host not in _INSTAGRAM_HOSTS:
+        return None
+    segments = [segment for segment in parts.path.split("/") if segment]
+    if len(segments) != 1 or not _USERNAME.fullmatch(segments[0]):
+        return None
+    after = parse_qs(parts.query).get("after")
+    return segments[0], (after[0] if after else None)
+
+
+async def _graphql(
+    client: httpx.AsyncClient,
+    friendly_name: str,
+    doc_id: str,
+    variables: dict,
+    retries: int,
+) -> object:
+    """POST one logged-out query to Instagram's web GraphQL; the parsed JSON.
+
+    Raises ``ProviderError`` when Instagram answers with a page instead of JSON
+    (worded as bot protection).
+    """
+    lsd = secrets.token_urlsafe(8)
+    response = await request_with_retry(
+        client,
+        "POST",
+        GRAPHQL_ENDPOINT,
+        retries=retries,
+        provider=_PROVIDER,
+        data={
+            "lsd": lsd,
+            "fb_api_caller_class": "RelayModern",
+            "fb_api_req_friendly_name": friendly_name,
+            "server_timestamps": "true",
+            "variables": json.dumps(variables, separators=(",", ":")),
+            "doc_id": doc_id,
+        },
+        # Measured: without the three Sec-Fetch-* headers Instagram answers 200
+        # with an HTML page instead of JSON.
+        headers={
+            "X-IG-App-ID": _APP_ID,
+            "X-FB-LSD": lsd,
+            "X-FB-Friendly-Name": friendly_name,
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+        },
+    )
+    try:
+        return response.json()
+    except ValueError as exc:
+        # src.failure_reason.classify keys on the "bot protection" wording.
+        raise ProviderError(
+            "instagram: blocked by bot protection (an HTML page instead of JSON)"
+        ) from exc
 
 
 def _media_id(code: str) -> str:
@@ -124,40 +207,9 @@ async def fetch_transcript(
     no video (worded as an empty response), or when Groq's answer cannot be
     parsed.
     """
-    lsd = secrets.token_urlsafe(8)
-    response = await request_with_retry(
-        instagram_client,
-        "POST",
-        GRAPHQL_ENDPOINT,
-        retries=retries,
-        provider=_PROVIDER,
-        data={
-            "lsd": lsd,
-            "fb_api_caller_class": "RelayModern",
-            "fb_api_req_friendly_name": _FRIENDLY_NAME,
-            "server_timestamps": "true",
-            "variables": json.dumps({"media_id": _media_id(shortcode)}, separators=(",", ":")),
-            "doc_id": _DOC_ID,
-        },
-        # Measured: without the three Sec-Fetch-* headers Instagram answers 200
-        # with an HTML page instead of JSON.
-        headers={
-            "X-IG-App-ID": _APP_ID,
-            "X-FB-LSD": lsd,
-            "X-FB-Friendly-Name": _FRIENDLY_NAME,
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Dest": "empty",
-        },
+    payload = await _graphql(
+        instagram_client, _FRIENDLY_NAME, _DOC_ID, {"media_id": _media_id(shortcode)}, retries
     )
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        # src.failure_reason.classify keys on the "bot protection" wording.
-        raise ProviderError(
-            "instagram: blocked by bot protection (an HTML page instead of JSON)"
-        ) from exc
-
     data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
     media = (data.get("xig_polaris_media") or {}).get("if_not_gated_logged_out")
     if not media:
@@ -208,4 +260,69 @@ async def fetch_transcript(
         lines += ["## Caption", "", caption, ""]
     transcript = "\n\n".join(_paragraphs(snippets)) if snippets else "_No speech in the audio._"
     lines += ["## Transcript", "", transcript]
+    return "\n".join(lines)
+
+
+def _post_kind(node: dict) -> str:
+    """What a timeline node is: ``reel``, ``carousel``, ``video`` or ``photo``."""
+    product_type = node.get("product_type")
+    if product_type == "clips":
+        return "reel"
+    if product_type == "carousel_container":
+        return "carousel"
+    if node.get("__typename") == "XIGPolarisVideoMedia":
+        return "video"
+    return "photo"
+
+
+def _post_date(pk: str) -> str:
+    """The ``YYYY-MM-DD`` (UTC) a media pk encodes."""
+    seconds = ((int(pk) >> 23) + _PK_EPOCH_MS) // 1000
+    return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+async def fetch_profile_posts(
+    client: httpx.AsyncClient,
+    username: str,
+    cursor: str | None,
+    retries: int,
+) -> str:
+    """Fetch one page of ``username``'s posts (after ``cursor``) and render Markdown.
+
+    Raises ``ProviderError`` when Instagram answers with a page instead of JSON
+    (worded as bot protection), or when there is no such public profile or it
+    shows no posts (worded as an empty response).
+    """
+    variables: dict = {"first": _PROFILE_PAGE_SIZE, "username": username}
+    if cursor:
+        variables["after"] = cursor
+    payload = await _graphql(client, _PROFILE_FRIENDLY_NAME, _PROFILE_DOC_ID, variables, retries)
+    data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
+    user = data.get("xig_user_by_username")
+    if not user:
+        # "empty response" is the wording classify() maps to `empty`.
+        raise ProviderError("instagram: empty response (no such public profile)")
+    timeline = user.get("polaris_ordered_timeline_connection") or {}
+    edges = timeline.get("edges") or []
+    if not edges:
+        raise ProviderError("instagram: empty response (the profile shows no posts)")
+
+    lines = [f"# @{username} on Instagram — posts"]
+    for edge in edges:
+        node = edge.get("node") or {}
+        kind = _post_kind(node)
+        section = "reel" if kind == "reel" else "p"
+        url = f"https://www.instagram.com/{section}/{node.get('code', '')}/"
+        lines += ["", f"## {_post_date(node.get('pk', '0'))} · {kind} · {url}"]
+        caption = ((node.get("caption") or {}).get("text") or "").strip()
+        if caption:
+            lines += ["", caption]
+
+    page_info = timeline.get("page_info") or {}
+    end_cursor = page_info.get("end_cursor")
+    if page_info.get("has_next_page") and end_cursor:
+        next_url = f"https://www.instagram.com/{username}/?after={quote(end_cursor, safe='')}"
+        lines += ["", f"Next page: {next_url}"]
+    else:
+        lines += ["", "No more posts."]
     return "\n".join(lines)

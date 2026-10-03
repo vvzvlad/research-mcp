@@ -1,4 +1,4 @@
-"""Instagram reel transcripts: url detection, the GraphQL + Groq fetch, the pipeline path.
+"""Instagram reel transcripts and profile posts: url detection, the fetches, the pipeline paths.
 
 All network I/O is mocked with respx.
 """
@@ -15,7 +15,14 @@ from src import failure_reason
 from src.pipeline import Pipeline
 from src.providers import _url_guard
 from src.providers.base import ProviderError
-from src.providers.instagram import GRAPHQL_ENDPOINT, GROQ_ENDPOINT, fetch_transcript, shortcode
+from src.providers.instagram import (
+    GRAPHQL_ENDPOINT,
+    GROQ_ENDPOINT,
+    fetch_profile_posts,
+    fetch_transcript,
+    profile,
+    shortcode,
+)
 from tests.conftest import _clear_provider_env
 
 SHORTCODE = "DbIv3T_xMUn"
@@ -389,3 +396,299 @@ async def test_read_instagram_without_groq_key_skips_the_path(monkeypatch, setti
     assert outcome.provider == "jina"
     assert outcome.tried == ["trafilatura", "jina"]
     assert graphql.call_count == 0
+
+
+# -- profile posts ---------------------------------------------------------------
+
+PROFILE_URL = "https://www.instagram.com/testuser/"
+CURSOR = "QVFB+abc/def=="
+NEXT_CURSOR = "QVFC+next/page=="
+
+# Each pk is ((ms - 1314220021721) << 23) for noon-ish UTC on the commented day.
+PROFILE_NODES = [
+    {  # pinned: older than the posts after it, the order must be kept as is
+        "code": "PHOTO123",
+        "pk": "3799663432152645632",  # 2025-12-31
+        "__typename": "XIGPolarisImageMedia",
+        "product_type": "feed",
+        "caption": {"text": ""},
+        "user": {"username": "testuser"},
+    },
+    {
+        "code": "REEL123",
+        "pk": "3997587604747845632",  # 2026-09-30
+        "__typename": "XIGPolarisVideoMedia",
+        "product_type": "clips",
+        "caption": {"text": "About the reel."},
+        "user": {"username": "testuser"},
+    },
+    {
+        "code": "CAROUSEL1",
+        "pk": "3964142224651845632",  # 2026-08-15
+        "__typename": "XIGPolarisCarouselMedia",
+        "product_type": "carousel_container",
+        "caption": {"text": "  Three photos.\n"},
+        "user": {"username": "testuser"},
+    },
+    {
+        "code": "VIDEO123",
+        "pk": "3931965202085445632",  # 2026-07-01
+        "__typename": "XIGPolarisVideoMedia",
+        "product_type": "feed",
+        "caption": None,
+        "user": {"username": "testuser"},
+    },
+]
+
+EXPECTED_PROFILE_MARKDOWN = (
+    "# @testuser on Instagram — posts\n"
+    "\n"
+    "## 2025-12-31 · photo · https://www.instagram.com/p/PHOTO123/\n"
+    "\n"
+    "## 2026-09-30 · reel · https://www.instagram.com/reel/REEL123/\n"
+    "\n"
+    "About the reel.\n"
+    "\n"
+    "## 2026-08-15 · carousel · https://www.instagram.com/p/CAROUSEL1/\n"
+    "\n"
+    "Three photos.\n"
+    "\n"
+    "## 2026-07-01 · video · https://www.instagram.com/p/VIDEO123/\n"
+    "\n"
+    "Next page: https://www.instagram.com/testuser/?after=QVFC%2Bnext%2Fpage%3D%3D"
+)
+
+
+def _profile_page(
+    nodes: list[dict] = PROFILE_NODES,
+    *,
+    end_cursor: str | None = NEXT_CURSOR,
+    has_next_page: bool = True,
+) -> dict:
+    """A GraphQL answer for one page of a public profile's posts."""
+    return {
+        "data": {
+            "xig_user_by_username": {
+                "polaris_ordered_timeline_connection": {
+                    "edges": [{"node": node} for node in nodes],
+                    "page_info": {"end_cursor": end_cursor, "has_next_page": has_next_page},
+                }
+            }
+        }
+    }
+
+
+UNKNOWN_PROFILE = {"data": {"xig_user_by_username": None}}
+
+
+def _form(request: httpx.Request) -> dict[str, str]:
+    """The fields of a form-urlencoded request body."""
+    return {key: values[0] for key, values in parse_qs(request.content.decode()).items()}
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://www.instagram.com/tvikas.m/", ("tvikas.m", None)),
+        ("https://www.instagram.com/tvikas.m", ("tvikas.m", None)),
+        ("https://instagram.com/some_user/", ("some_user", None)),
+        ("https://m.instagram.com/some_user", ("some_user", None)),
+        ("https://www.instagram.com/some_user/?hl=en", ("some_user", None)),
+        (
+            "https://www.instagram.com/tvikas.m/?after=QVFB%2Babc%2Fdef%3D%3D",
+            ("tvikas.m", CURSOR),
+        ),
+    ],
+)
+def test_profile_recognises_every_url_shape(url, expected):
+    assert profile(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://www.instagram.com/reel/{SHORTCODE}/",  # a post
+        f"https://www.instagram.com/p/{SHORTCODE}/",  # a post
+        f"https://www.instagram.com/someuser/reel/{SHORTCODE}/",  # a post under a user
+        "https://www.instagram.com/someuser/reels/",  # two segments
+        "https://www.instagram.com/someuser/tagged/",  # two segments
+        "https://www.instagram.com/",  # no segment
+        "https://example.com/someuser/",  # not Instagram
+        "https://www.instagram.com/some-user/",  # "-" is not a username character
+        "https://www.instagram.com/bad!name/",  # nor is "!"
+        "https://www.instagram.com/" + "a" * 31 + "/",  # longer than 30
+        "http://[::1",  # malformed: must not raise
+    ],
+)
+def test_profile_is_none_for_anything_else(url):
+    assert profile(url) is None
+
+
+@respx.mock
+async def test_fetch_profile_posts_renders_markdown():
+    graphql = respx.post(GRAPHQL_ENDPOINT).mock(
+        return_value=httpx.Response(200, json=_profile_page())
+    )
+
+    async with httpx.AsyncClient() as client:
+        markdown = await fetch_profile_posts(client, "testuser", CURSOR, retries=0)
+
+    request = graphql.calls.last.request
+    form = _form(request)
+    assert form["variables"] == json.dumps(
+        {"first": 12, "username": "testuser", "after": CURSOR}, separators=(",", ":")
+    )
+    assert form["doc_id"] == "27553725110923321"
+    friendly_name = "PolarisLoggedOutDesktopWWWProfilePostsTabContentQuery"
+    assert form["fb_api_req_friendly_name"] == friendly_name
+    assert request.headers["X-FB-Friendly-Name"] == friendly_name
+    assert form["lsd"] == request.headers["X-FB-LSD"]
+    assert request.headers["X-IG-App-ID"] == "936619743392459"
+    assert request.headers["Sec-Fetch-Site"] == "same-origin"
+    assert request.headers["Sec-Fetch-Mode"] == "cors"
+    assert request.headers["Sec-Fetch-Dest"] == "empty"
+
+    assert markdown == EXPECTED_PROFILE_MARKDOWN
+
+
+@pytest.mark.parametrize(
+    "page_info",
+    [
+        {"end_cursor": NEXT_CURSOR, "has_next_page": False},
+        {"end_cursor": None, "has_next_page": True},
+    ],
+)
+@respx.mock
+async def test_fetch_profile_posts_last_page_says_no_more_posts(page_info):
+    graphql = respx.post(GRAPHQL_ENDPOINT).mock(
+        return_value=httpx.Response(200, json=_profile_page(PROFILE_NODES[1:2], **page_info))
+    )
+
+    async with httpx.AsyncClient() as client:
+        markdown = await fetch_profile_posts(client, "testuser", None, retries=0)
+
+    # The first page carries no cursor at all.
+    assert json.loads(_form(graphql.calls.last.request)["variables"]) == {
+        "first": 12,
+        "username": "testuser",
+    }
+    assert markdown.endswith("About the reel.\n\nNo more posts.")
+    assert "Next page" not in markdown
+
+
+@pytest.mark.parametrize(
+    ("answer", "wording"),
+    [
+        (UNKNOWN_PROFILE, "no such public profile"),
+        (_profile_page([]), "the profile shows no posts"),
+    ],
+)
+@respx.mock
+async def test_fetch_profile_posts_without_posts_is_classified_empty(answer, wording):
+    respx.post(GRAPHQL_ENDPOINT).mock(return_value=httpx.Response(200, json=answer))
+
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as caught:
+            await fetch_profile_posts(client, "testuser", None, retries=0)
+
+    assert wording in str(caught.value)
+    assert failure_reason.classify(caught.value) == failure_reason.EMPTY
+
+
+@respx.mock
+async def test_fetch_profile_posts_html_answer_is_classified_bot_protection():
+    respx.post(GRAPHQL_ENDPOINT).mock(
+        return_value=httpx.Response(
+            200, text="<!DOCTYPE html><html><body>Login</body></html>",
+            headers={"Content-Type": "text/html"},
+        )
+    )
+
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as caught:
+            await fetch_profile_posts(client, "testuser", None, retries=0)
+
+    assert failure_reason.classify(caught.value) == failure_reason.BOT_PROTECTION
+
+
+@pytest.mark.parametrize("groq_key", [None, GROQ_KEY])
+@respx.mock
+async def test_read_profile_url_returns_the_posts(monkeypatch, settings, capture_logs, groq_key):
+    # The path needs no Groq key, and is never billed — not even when the key
+    # puts "instagram" into the paid set for the transcript path.
+    _clear_provider_env(monkeypatch)
+    _public_dns(monkeypatch)
+    if groq_key:
+        monkeypatch.setenv("GROQ_API_KEY", groq_key)
+    respx.post(GRAPHQL_ENDPOINT).mock(return_value=httpx.Response(200, json=_profile_page()))
+    groq = respx.post(GROQ_ENDPOINT).mock(return_value=httpx.Response(200, json=GROQ_ANSWER))
+    probe = respx.get(PROFILE_URL).mock(return_value=httpx.Response(200, text="<html></html>"))
+    jina = respx.get(f"https://r.jina.ai/{PROFILE_URL}").mock(return_value=httpx.Response(500))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(PROFILE_URL)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.provider == "instagram"
+    assert outcome.tried == ["instagram"]
+    assert outcome.failures == []
+    assert outcome.markdown == EXPECTED_PROFILE_MARKDOWN
+    # The probe, the read chain and Groq never ran.
+    assert probe.call_count == 0
+    assert jina.call_count == 0
+    assert groq.call_count == 0
+    line = next(m for m in capture_logs if "provider=instagram ok=true" in m)
+    assert "paid_calls=0" in line
+
+
+@respx.mock
+async def test_read_profile_routes_via_instagram_proxy(monkeypatch, settings):
+    _clear_provider_env(monkeypatch)
+    _public_dns(monkeypatch)
+    instagram_proxy = "socks5://instagram-proxy.invalid:1080"
+    monkeypatch.setenv("INSTAGRAM_PROXY", instagram_proxy)
+    respx.post(GRAPHQL_ENDPOINT).mock(return_value=httpx.Response(200, json=_profile_page()))
+
+    pipe = Pipeline.build(settings)
+    requested: list[str | None] = []
+    client_for = pipe._clients.client_for
+
+    def _spy(wanted: str | None) -> httpx.AsyncClient:
+        requested.append(wanted)
+        return client_for(wanted)
+
+    monkeypatch.setattr(pipe._clients, "client_for", _spy)
+    try:
+        outcome = await pipe.read(PROFILE_URL)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.provider == "instagram"
+    assert requested == [instagram_proxy]
+
+
+@respx.mock
+async def test_read_profile_failure_falls_through(monkeypatch, settings):
+    _clear_provider_env(monkeypatch)
+    _public_dns(monkeypatch)
+    respx.post(GRAPHQL_ENDPOINT).mock(return_value=httpx.Response(200, json=UNKNOWN_PROFILE))
+    # The profile page itself is a login wall: trafilatura finds nothing, jina wins.
+    respx.get(PROFILE_URL).mock(
+        return_value=httpx.Response(200, text="<html><body><div id='app'></div></body></html>")
+    )
+    jina_md = "# Instagram\n\n" + ("Profile page content. " * 40)
+    respx.get(f"https://r.jina.ai/{PROFILE_URL}").mock(
+        return_value=httpx.Response(200, text=jina_md)
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(PROFILE_URL)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.provider == "jina"
+    assert outcome.tried == ["instagram", "trafilatura", "jina"]
+    assert outcome.failures[0] == ("instagram", "empty")

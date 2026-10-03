@@ -19,6 +19,9 @@ routed via ``YOUTUBE_PROXY``); a video without one falls through to the normal
 path. An Instagram post url is likewise tried as a Groq Whisper transcript of its
 audio (``src/providers/instagram.py``, enabled by ``GROQ_API_KEY``, routed via
 ``INSTAGRAM_PROXY`` / ``GROQ_PROXY``); a failure falls through the same way.
+An Instagram profile url is read as one page of the profile's posts with the url
+of the next page (same module, no key needed, routed via ``INSTAGRAM_PROXY``);
+a failure falls through too.
 Read then detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic) and
 extracts them with pypdf. Otherwise it tries the enabled ``READ_PIPELINE``
 instances in order; the first to return content ``>= fallback_min_chars`` wins;
@@ -64,7 +67,9 @@ from src.providers.base import (
     SearchProvider,
     SearchResult,
 )
+from src.providers.instagram import fetch_profile_posts as fetch_instagram_profile_posts
 from src.providers.instagram import fetch_transcript as fetch_instagram_transcript
+from src.providers.instagram import profile as instagram_profile
 from src.providers.instagram import shortcode as instagram_shortcode
 from src.providers.pdf import NO_TEXT_LAYER_NOTICE, extract_pdf_text, looks_like_pdf
 from src.providers.registry import REGISTRY
@@ -101,13 +106,14 @@ class ReadOutcome:
     """One read request: the markdown plus how the pipeline got hold of it.
 
     ``provider`` is the instance that won (``"pdf"`` / ``"youtube"`` /
-    ``"instagram"`` for the PDF, YouTube-transcript and Instagram-transcript
-    paths, which no instance serves), ``tried`` is the chain walked up to and
-    including it (``"youtube"`` first for a video url, ``"instagram"`` for a post
-    url), and ``failures`` pairs every instance that did not deliver with its
-    ``src.failure_reason`` category. ``thin`` marks the last-resort branch: every
-    instance came back under ``fallback_min_chars`` and the longest of those
-    scraps is what is being returned.
+    ``"instagram"`` for the PDF, YouTube-transcript and Instagram transcript or
+    profile-posts paths, which no instance serves), ``tried`` is the chain
+    walked up to and including it (``"youtube"`` first for a video url,
+    ``"instagram"`` for a post or profile url), and ``failures`` pairs every
+    instance that did not deliver with its ``src.failure_reason`` category.
+    ``thin`` marks the last-resort branch: every instance came back under
+    ``fallback_min_chars`` and the longest of those scraps is what is being
+    returned.
     """
 
     markdown: str
@@ -350,7 +356,8 @@ class Pipeline:
         self._youtube_proxy = youtube_proxy
         # The Instagram transcript path, also run by read() ahead of the probe:
         # the Groq key that enables it (None = path off) and the proxies for
-        # its two upstreams (None = direct).
+        # its two upstreams (None = direct). The Instagram profile-posts path
+        # needs no key and shares the Instagram proxy.
         self._groq_api_key = groq_api_key
         self._instagram_proxy = instagram_proxy
         self._groq_proxy = groq_proxy
@@ -477,10 +484,12 @@ class Pipeline:
             # Groq bills every transcription, so the path joins the paid set.
             paid_names.add("instagram")
             logger.info("Instagram transcripts enabled (Groq Whisper)")
-            if instagram_proxy:
-                logger.info("Instagram transcripts route via proxy")
             if groq_proxy:
                 logger.info("Groq transcription routes via proxy")
+        # The profile-posts path needs no key, so the Instagram proxy is used
+        # (and announced) either way.
+        if instagram_proxy:
+            logger.info("Instagram requests route via proxy")
 
         return cls(  # type: ignore[arg-type]
             settings,
@@ -769,6 +778,43 @@ class Pipeline:
                 logger.info("read url={} -> instagram transcript failed: {}", url, exc)
             else:
                 billed.append("instagram")
+                _log_ok("instagram")
+                return ReadOutcome(
+                    markdown=markdown,
+                    provider="instagram",
+                    tried=list(tried),
+                    failures=list(failures),
+                    thin=False,
+                    elapsed_ms=_ms(),
+                )
+
+        # 0c) An Instagram profile: its page is a login wall too, so list one
+        #     page of the profile's posts via Instagram's GraphQL, with the url
+        #     of the next page. Needs no key and is not billed. Same plain client
+        #     bound to INSTAGRAM_PROXY as 0b. Any failure — an unknown or private
+        #     profile, a one-segment path that is no profile, a bot wall — is
+        #     recorded like a read-provider failure and falls through to the
+        #     normal path below.
+        handle = instagram_profile(url)
+        if handle is not None:
+            username, cursor = handle
+            tried.append("instagram")
+            try:
+                markdown = await fetch_instagram_profile_posts(
+                    self._clients.client_for(self._instagram_proxy),
+                    username,
+                    cursor,
+                    self._settings.retries,
+                )
+            except ProviderError as exc:
+                errors.append(str(exc))
+                failures.append(("instagram", failure_reason.classify(exc)))
+                logger.info("read url={} -> instagram profile failed: {}", url, exc)
+            except Exception as exc:  # noqa: BLE001 — treat as provider failure
+                errors.append(f"instagram: {exc}")
+                failures.append(("instagram", failure_reason.classify(exc)))
+                logger.info("read url={} -> instagram profile failed: {}", url, exc)
+            else:
                 _log_ok("instagram")
                 return ReadOutcome(
                     markdown=markdown,
