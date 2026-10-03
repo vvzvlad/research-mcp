@@ -38,6 +38,7 @@ services:
       TAVILY_1_API_KEY: XXX      # optional (primary)
       TAVILY_2_API_KEY: XXX      # optional (failover)
       FIRECRAWL_API_KEY: XXX     # optional
+      GROQ_API_KEY: XXX          # optional: Instagram video transcripts (Groq Whisper)
       # --- per-instance proxy (optional, SOCKS5/HTTP; for clean egress) ---
       # EXA_PROXY: socks5://proxy.invalid:1080
       # BRAVE_PROXY: socks5://proxy.invalid:1080
@@ -47,6 +48,8 @@ services:
       # TAVILY_2_PROXY: socks5://proxy.invalid:1080
       # FIRECRAWL_PROXY: socks5://proxy.invalid:1080
       # YOUTUBE_PROXY: socks5://proxy.invalid:1080   # YouTube transcripts; required where youtube.com is blocked
+      # INSTAGRAM_PROXY: socks5://proxy.invalid:1080 # Instagram transcripts; required where instagram.com is blocked
+      # GROQ_PROXY: socks5://proxy.invalid:1080      # Groq Whisper; required where Groq answers "Forbidden"
       TZ: Europe/Moscow
     networks:
       - docker_main_net
