@@ -21,6 +21,7 @@ import httpx
 import pytest
 import respx
 
+from src.failure_reason import ACCESS_DENIED, BOT_PROTECTION, classify
 from src.providers.base import ProviderError
 from src.providers.jina import JINA_READER_BASE, JinaRead
 
@@ -555,10 +556,9 @@ async def test_missing_page_fails_without_escalation(make_config):
 
 
 @respx.mock
-async def test_blocked_page_climbs_the_ladder_and_skips_refused_steps(make_config):
+async def test_blocked_page_goes_straight_to_the_residential_exit(make_config):
     route = respx.get(READER_URL)
     route.side_effect = [
-        httpx.Response(200, text=_target_error_page(403)),
         httpx.Response(200, text=_target_error_page(403)),
         httpx.Response(200, text=FULL_TEXT),
     ]
@@ -566,20 +566,69 @@ async def test_blocked_page_climbs_the_ladder_and_skips_refused_steps(make_confi
     async with httpx.AsyncClient() as client:
         out = await provider.read(client, URL)
     assert out == FULL_TEXT.strip()
-    assert route.call_count == 3  # plain → readerlm-v2 → residential proxy
+    # plain → residential proxy: the parsing-only readerlm step is skipped.
+    assert route.call_count == 2
+    assert route.calls.last.request.headers["x-proxy"] == "auto"
 
 
 @respx.mock
-async def test_blocked_on_every_step_fails_with_the_target_status(make_config):
-    route = respx.get(READER_URL).mock(
+async def test_blocked_pdf_on_the_residential_exit_never_buys_ocr(make_config):
+    route = respx.get(PDF_READER_URL).mock(
         return_value=httpx.Response(200, text=_target_error_page(403))
     )
     provider = JinaRead(make_config("jina", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
+            await provider.read(client, PDF_URL)
+    assert classify(excinfo.value) == ACCESS_DENIED
+    assert route.call_count == 2  # plain → residential; OCR shares that exit
+
+
+@respx.mock
+async def test_refusal_survives_a_failing_residential_step(make_config):
+    route = respx.get(READER_URL)
+    route.side_effect = [
+        httpx.Response(200, text=_target_error_page(403)),
+        httpx.Response(500),
+    ]
+    provider = JinaRead(make_config("jina", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
             await provider.read(client, URL)
     assert "HTTP 403" in str(excinfo.value)
-    assert route.call_count == 3  # non-pdf: no OCR step
+    assert classify(excinfo.value) == ACCESS_DENIED
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_refusal_met_on_a_ladder_step_is_reported(make_config):
+    # An empty plain answer climbs; the browser engine then meets the site's
+    # refusal, and the latest refusal is what the error names.
+    route = respx.get(READER_URL)
+    route.side_effect = [
+        httpx.Response(200, text=""),
+        httpx.Response(200, text=_target_error_page(403)),
+        httpx.Response(200, text=CAPTCHA_PAGE),
+    ]
+    provider = JinaRead(make_config("jina", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.read(client, URL)
+    assert classify(excinfo.value) == BOT_PROTECTION
+    assert route.call_count == 3
+
+
+@respx.mock
+async def test_keyless_refusal_fails_with_the_target_status(make_config):
+    route = respx.get(READER_URL).mock(
+        return_value=httpx.Response(200, text=_target_error_page(403))
+    )
+    provider = JinaRead(make_config("jina"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.read(client, URL)
+    assert "HTTP 403" in str(excinfo.value)
+    assert route.call_count == 1
 
 
 @respx.mock

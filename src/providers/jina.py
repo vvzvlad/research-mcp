@@ -136,9 +136,10 @@ class JinaRead:
             if budget > 0:
                 headers["X-Token-Budget"] = str(budget)
         # First attempt: the plain (cheap) markdown conversion. An HTTP-level
-        # failure here propagates as ProviderError WITHOUT the escalations
-        # below: an upstream 4xx means the site refused jina's fetch, and the
-        # heavy tiers fix parsing, not access.
+        # failure of jina itself here propagates as ProviderError WITHOUT the
+        # escalations below: the heavy tiers fix parsing, not jina's own
+        # errors. A site's refusal behind a 200 is a different case — see
+        # _refusal and the residential step below.
         response = await request_with_retry(
             client,
             "GET",
@@ -179,6 +180,10 @@ class JinaRead:
                     break
                 if pdf_only and not _is_pdf_url(url):
                     continue
+                # After a refusal only a step on a different exit (x-proxy) can
+                # get past it; a parsing-only step would just be refused again.
+                if reason and "x-proxy" not in extra_headers:
+                    continue
                 try:
                     retry_response = await request_with_retry(
                         client,
@@ -202,7 +207,13 @@ class JinaRead:
                     # the next (dearer) step.
                     if text:
                         return text
-                    raise
+                    if reason is None:
+                        raise
+                    # Report the refusal, not this step's failure. The raise
+                    # happens below, outside this except: classify() follows
+                    # __context__, so raising here would still read as the
+                    # step's timeout.
+                    break
                 # One successful read() can mean SEVERAL billed 200s (each of
                 # these above plain price) while the pipeline accounts a single
                 # provider name. Each step logs its own line, and only after its
@@ -212,16 +223,24 @@ class JinaRead:
                 # client-side timeout on a request the server already processed
                 # and billed (see the billed.append comment in Pipeline.read).
                 # One caveat: a line is also emitted when the read() still fails
-                # afterwards — the step returned 200 but every tier was empty,
-                # so the empty-guard below raises ProviderError — and then jina
-                # contributes no entry to the pipeline's `billed` at all, so
-                # reconstructing spend as paid_calls + these log lines
-                # undercounts that rare case.
+                # afterwards — the step returned 200 but every tier was empty
+                # or refused, so the guard below raises ProviderError — and then
+                # jina contributes no entry to the pipeline's `billed` at all,
+                # so reconstructing spend as paid_calls + these log lines
+                # undercounts that case. A refusal on the plain attempt raises
+                # before any line, leaving its one billed call uncounted too.
                 logger.info("{}: {} for url={}", self.name, label, url)
                 retry_text = retry_response.text.strip()
-                # A refused step brought no text, however long its page.
-                if _refusal(retry_text):
+                step_refusal = _refusal(retry_text)
+                if step_refusal:
+                    # A refused step brought no text, however long its page.
+                    reason, final = step_refusal
                     retry_text = ""
+                    # Nothing further down the ladder gets past a CAPTCHA, a
+                    # missing page, or a refusal on the residential exit itself
+                    # (the OCR step uses that same exit).
+                    if final or "x-proxy" in extra_headers:
+                        break
                 # Longest wins: any tier can come back thin (or empty), so keep
                 # whichever extracted more.
                 if len(retry_text) > len(text):
