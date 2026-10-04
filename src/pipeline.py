@@ -751,9 +751,10 @@ class Pipeline:
                 errors.append(str(exc) if isinstance(exc, ProviderError) else f"{provider.name}: {exc}")
                 failures.append((provider.name, failure_reason.classify(exc)))
                 if specific:
-                    # A failed transcript is hidden behind whatever the chain
-                    # reads next, so it gets its own line: otherwise a youtube
-                    # that flags our egress as a bot shows only in `tried=`.
+                    # A failed url-specific reader is hidden behind whatever the
+                    # chain reads next, so it gets its own line: otherwise a
+                    # youtube that flags our egress as a bot shows only in
+                    # `tried=`.
                     logger.info("read url={} -> {} failed: {}", url, provider.name, exc)
                 continue
             # Returned without raising → a billed 200 (even if too thin). One

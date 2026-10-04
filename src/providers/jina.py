@@ -7,8 +7,9 @@ live 2026-10-04): GET ``https://r.jina.ai/{url}``. Headers used here:
   ``{"code": 200, "status": 20000, "data": {...}, "meta": {...}}``. ``data``
   holds ``title``, ``url``, ``content`` (the Markdown body, WITHOUT the
   "Title:/URL Source:/Markdown Content:" header block of the plain-text
-  answer), ``httpStatus`` (an int: the TARGET site's status) and an optional
-  ``warning`` string.
+  answer), an optional ``publishedTime``, ``httpStatus`` (an int: the TARGET
+  site's status) and an optional ``warning`` string. ``read`` puts the title,
+  url and date back in front of a non-empty body, as the plain answer had them.
 - ``X-Return-Format: markdown`` asks for Markdown explicitly.
 - ``Authorization: Bearer {key}`` is OPTIONAL — keyless works at a lower rate
   limit — so this instance is always enabled.
@@ -115,7 +116,12 @@ class _Refusal(NamedTuple):
 
 
 class _Answer(NamedTuple):
-    """One jina answer: the stripped ``data.content`` and the site's refusal."""
+    """One jina answer and the site's refusal.
+
+    ``text`` is the stripped ``data.content`` led by the rebuilt Title / URL
+    Source / Published Time header (only when the body is non-empty), so the
+    header counts toward ``fallback_min_chars`` as it did in the plain answer.
+    """
 
     text: str
     refusal: _Refusal | None

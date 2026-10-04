@@ -358,7 +358,9 @@ async def test_read_youtube_routes_via_youtube_proxy(monkeypatch, settings):
 
 
 @respx.mock
-async def test_read_youtube_video_without_captions_falls_through(monkeypatch, settings):
+async def test_read_youtube_video_without_captions_falls_through(
+    monkeypatch, settings, capture_logs
+):
     _clear_provider_env(monkeypatch)
     _public_dns(monkeypatch)
     url = f"https://www.youtube.com/watch?v={VIDEO}"
@@ -379,3 +381,7 @@ async def test_read_youtube_video_without_captions_falls_through(monkeypatch, se
     assert outcome.provider == "jina"
     assert outcome.tried == ["youtube", "trafilatura", "jina"]
     assert outcome.failures[0] == ("youtube", "empty")
+    # The url-specific reader's failure gets its own log line; trafilatura's,
+    # an ordinary reader in the chain, does not.
+    assert sum(f"read url={url} -> youtube failed:" in m for m in capture_logs) == 1
+    assert not any("-> trafilatura failed:" in m for m in capture_logs)
