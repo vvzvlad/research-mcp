@@ -1,6 +1,6 @@
 """SearXNG search provider (self-hosted metasearch).
 
-API: GET ``{url}/search?q=&format=json&pageno=&language=`` →
+API: GET ``{url}/search?q=&format=json&language=`` →
 ``{"results": [{"url", "title", "content", ...}], ...}``.
 """
 
@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import ProviderConfig, ProviderError, SearchResult
 from src.providers.registry import register
@@ -51,7 +52,6 @@ class SearxngSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
         # Local throttle, SKIP semantics: if the slot is taken this instance drops
@@ -79,11 +79,12 @@ class SearxngSearch:
         now = time.monotonic()
         if now - self._last_call < _MIN_INTERVAL_SECONDS:
             raise ProviderError(
-                f"{self.name}: throttled (min interval {_MIN_INTERVAL_SECONDS:.0f}s)"
+                f"{self.name}: throttled (min interval {_MIN_INTERVAL_SECONDS:.0f}s)",
+                reason=failure_reason.RATE_LIMIT,
             )
         self._last_call = now
 
-        params: dict[str, Any] = {"q": query, "format": "json", "pageno": page}
+        params: dict[str, Any] = {"q": query, "format": "json"}
         if language:
             params["language"] = language
         response = await request_with_retry(

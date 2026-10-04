@@ -25,6 +25,7 @@ import respx
 
 from src.pipeline import Pipeline
 from src.providers import searxng as searxng_module
+from src import failure_reason
 from src.providers.base import ProviderError
 from src.providers.searxng import _MIN_INTERVAL_SECONDS, SearxngSearch
 from tests.conftest import _clear_provider_env, _mock_duckduckgo_rate_limited
@@ -71,7 +72,7 @@ async def test_first_call_passes(make_config, clock):
     )
     provider = SearxngSearch(make_config("searxng", url=SEARXNG_URL))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [r.url for r in results] == ["https://sx.test/1"]
 
 
@@ -82,11 +83,12 @@ async def test_second_call_within_interval_is_throttled(make_config, clock):
     )
     provider = SearxngSearch(make_config("searxng", url=SEARXNG_URL))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, None)
+        await provider.search(client, "q", 5, None)
         clock.advance(_MIN_INTERVAL_SECONDS - 1)  # still inside the window
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "throttled" in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.RATE_LIMIT
     assert route.call_count == 1  # the skipped query never hit the network
 
 
@@ -97,9 +99,9 @@ async def test_call_passes_again_after_the_interval(make_config, clock):
     )
     provider = SearxngSearch(make_config("searxng", url=SEARXNG_URL))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, None)
+        await provider.search(client, "q", 5, None)
         clock.advance(_MIN_INTERVAL_SECONDS + 1)
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [r.url for r in results] == ["https://sx.test/1"]
     assert route.call_count == 2
 
@@ -113,9 +115,9 @@ async def test_call_passes_exactly_at_the_interval(make_config, clock):
     )
     provider = SearxngSearch(make_config("searxng", url=SEARXNG_URL))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, None)
+        await provider.search(client, "q", 5, None)
         clock.advance(_MIN_INTERVAL_SECONDS)
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [r.url for r in results] == ["https://sx.test/1"]
     assert route.call_count == 2
 
@@ -132,8 +134,8 @@ async def test_concurrent_calls_let_exactly_one_through(make_config, clock):
     provider = SearxngSearch(make_config("searxng", url=SEARXNG_URL))
     async with httpx.AsyncClient() as client:
         outcomes = await asyncio.gather(
-            provider.search(client, "q", 5, 1, None),
-            provider.search(client, "q", 5, 1, None),
+            provider.search(client, "q", 5, None),
+            provider.search(client, "q", 5, None),
             return_exceptions=True,
         )
     passed = [o for o in outcomes if isinstance(o, list)]
@@ -156,7 +158,7 @@ async def test_retry_is_disabled_so_one_slot_is_one_upstream_query(make_config, 
     provider = SearxngSearch(config)
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError):
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert route.call_count == 1  # one attempt, no retry
 
 
@@ -168,11 +170,11 @@ async def test_failed_query_still_spends_the_slot(make_config, clock):
     provider = SearxngSearch(make_config("searxng", url=SEARXNG_URL))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as first:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
         assert "throttled" not in str(first.value)  # it really was the HTTP failure
         clock.advance(_MIN_INTERVAL_SECONDS - 1)
         with pytest.raises(ProviderError) as second:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "throttled" in str(second.value)
     assert route.call_count == 1
 
@@ -198,9 +200,9 @@ async def test_throttled_searxng_does_not_break_the_search(
 
     pipe = Pipeline.build(settings)
     try:
-        first = (await pipe.search("q", num_results=10, page=1, language=None)).results
+        first = (await pipe.search("q", num_results=10, language=None)).results
         clock.advance(2.0)  # our median gap between searches
-        second = (await pipe.search("q", num_results=10, page=1, language=None)).results
+        second = (await pipe.search("q", num_results=10, language=None)).results
     finally:
         await pipe.aclose()
 

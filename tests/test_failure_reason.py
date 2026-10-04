@@ -1,8 +1,8 @@
 """The failure classifier: an exception in, one category constant out.
 
-Two families of inputs are pinned here: real transport exceptions (where the
-answer comes from the __cause__/__context__ chain) and our own ProviderError
-wording (where it comes from tolerant text matching).
+Two families of inputs are pinned here: our own ProviderError (where the answer
+is the ``reason`` its raise site set) and real transport exceptions (where it
+comes from the __cause__/__context__ chain). The message text never decides.
 """
 
 import socket
@@ -25,6 +25,7 @@ from src.failure_reason import (
     TLS,
     classify,
     dominant_reason,
+    for_target_status,
 )
 from src.providers.base import ProviderError
 
@@ -84,9 +85,9 @@ def test_suppressed_context_is_not_followed():
         try:
             raise httpx.ReadTimeout("timed out")
         except httpx.ReadTimeout:
-            raise ProviderError("jina: target page returned HTTP 403") from None
+            raise ProviderError("jina: client error (HTTP 404)") from None
     except ProviderError as exc:
-        assert classify(exc) == ACCESS_DENIED
+        assert classify(exc) == OTHER
 
 
 def test_chain_walk_is_bounded():
@@ -98,62 +99,67 @@ def test_chain_walk_is_bounded():
     assert classify(exc) == OTHER
 
 
-# -- our own ProviderError wording -----------------------------------------
+# -- the reason set at the raise site --------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("message", "expected"),
-    [
-        ("tavily-1: rate limited (HTTP 429)", RATE_LIMIT),
-        ("tavily-2: out of credits (HTTP 402)", NO_CREDITS),
-        ("jina: client error (HTTP 403)", ACCESS_DENIED),
-        ("jina: client error (HTTP 401)", ACCESS_DENIED),
-        # The site's refusal jina reports behind a 200.
-        ("jina: target page returned HTTP 403", ACCESS_DENIED),
-        ("jina: bot protection (CAPTCHA wall)", BOT_PROTECTION),
-        # The page does not exist, in each provider's wording.
-        ("trafilatura: target page returned HTTP 404", NOT_FOUND),
-        ("jina: target page returned HTTP 410", NOT_FOUND),
-        # A provider's OWN endpoint answering 404 says nothing about the page.
-        ("crawl4ai: client error (HTTP 404)", OTHER),
-        ("firecrawl: target page returned HTTP 404", NOT_FOUND),
-        ("tavily-1: 404 page not found", NOT_FOUND),
-        ("crawl4ai: empty markdown (bot protection?)", BOT_PROTECTION),
-        ("firecrawl: empty markdown", EMPTY),
-        ("trafilatura: no main content extracted", EMPTY),
-        ("trafilatura: content too thin (12 chars)", EMPTY),
-        # Every provider's own way of saying "nothing to take" must agree, or
-        # dominant_reason splits the vote on a page that is empty everywhere.
-        ("jina: empty response", EMPTY),
-        ("tavily-1: empty extraction", EMPTY),
-        # The local throttle is this project's most frequent search failure and
-        # means exactly what a remote 429 means: wait, do not retry now.
-        ("searxng: throttled (min interval 45s)", RATE_LIMIT),
-        ("serper: server error after retries (HTTP 500)", OTHER),
-        ("brave: unparseable response body", OTHER),
-    ],
+    "reason",
+    [RATE_LIMIT, NO_CREDITS, ACCESS_DENIED, BOT_PROTECTION, NOT_FOUND, EMPTY, OTHER],
 )
-def test_provider_error_messages(message, expected):
-    assert classify(ProviderError(message)) == expected
+def test_explicit_reason_is_returned(reason):
+    assert classify(ProviderError("provider: whatever it says", reason=reason)) == reason
+
+
+def test_explicit_reason_wins_over_the_chain():
+    # jina reports a site's refusal even when a later ladder step timed out.
+    exc = _wrapped("jina: target page returned HTTP 403", httpx.ReadTimeout("timed out"))
+    exc.reason = ACCESS_DENIED
+    assert classify(exc) == ACCESS_DENIED
+
+
+def test_provider_error_without_reason_falls_to_the_chain():
+    exc = _wrapped("exa: transport error: timed out", httpx.ConnectTimeout("timed out"))
+    assert exc.reason is None
+    assert classify(exc) == TIMEOUT
 
 
 @pytest.mark.parametrize(
-    ("message", "expected"),
+    "message",
     [
-        # Reworded 4xx texts (another branch is rewriting them) must still land
-        # in the right bucket: the code is matched anywhere, case-insensitively.
-        ("tavily-1: не хватает кредитов, http402", NO_CREDITS),
-        ("exa: refused by upstream, http 403", ACCESS_DENIED),
-        ("brave: throttled, HTTP429", RATE_LIMIT),
-        ("firecrawl: Rate Limited", RATE_LIMIT),
+        # Worded like a category, but nobody set one: the text decides nothing.
+        "tavily-1: rate limited (HTTP 429)",
+        "crawl4ai: empty markdown (bot protection?)",
+        "trafilatura: target page returned HTTP 404",
+        "serper: server error after retries (HTTP 500)",
     ],
 )
-def test_message_matching_is_tolerant(message, expected):
-    assert classify(ProviderError(message)) == expected
+def test_provider_error_without_reason_or_chain_is_other(message):
+    assert classify(ProviderError(message)) == OTHER
 
 
 def test_unknown_exception_is_other():
     assert classify(ValueError("something odd")) == OTHER
+
+
+# -- for_target_status -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (404, NOT_FOUND),
+        (410, NOT_FOUND),
+        (401, ACCESS_DENIED),
+        (403, ACCESS_DENIED),
+        (429, RATE_LIMIT),
+        (400, OTHER),
+        (402, OTHER),
+        (500, OTHER),
+        (503, OTHER),
+    ],
+)
+def test_for_target_status(code, expected):
+    assert for_target_status(code) == expected
 
 
 # -- dominant_reason -------------------------------------------------------

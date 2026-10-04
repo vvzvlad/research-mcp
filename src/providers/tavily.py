@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import httpx
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import ProviderConfig, ProviderError
 from src.providers.registry import register
@@ -50,7 +51,15 @@ class TavilyRead:
             for item in failed:
                 if isinstance(item, dict) and item.get("url") == url:
                     error = item.get("error") or "extraction failed"
-                    raise ProviderError(f"{self.name}: {error}")
+                    # Measured live: a missing page reads "404 page not found".
+                    raise ProviderError(
+                        f"{self.name}: {error}",
+                        reason=(
+                            failure_reason.NOT_FOUND
+                            if "page not found" in str(error).lower()
+                            else None
+                        ),
+                    )
 
         results = data.get("results")
         if isinstance(results, list):
@@ -60,4 +69,4 @@ class TavilyRead:
                 content = (item.get("raw_content") or "").strip()
                 if content:
                     return content
-        raise ProviderError(f"{self.name}: empty extraction")
+        raise ProviderError(f"{self.name}: empty extraction", reason=failure_reason.EMPTY)

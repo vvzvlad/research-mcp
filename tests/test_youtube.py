@@ -14,7 +14,7 @@ from src.pipeline import Pipeline
 from src.providers import _url_guard
 from src.providers.base import ProviderError
 from src.providers.youtube import PLAYER_ENDPOINT, fetch_transcript, video_id
-from tests.conftest import _clear_provider_env
+from tests.conftest import _clear_provider_env, _jina_answer
 
 VIDEO = "aA9R8bJAf68"
 TIMEDTEXT = "https://www.youtube.com/api/timedtext"
@@ -358,7 +358,9 @@ async def test_read_youtube_routes_via_youtube_proxy(monkeypatch, settings):
 
 
 @respx.mock
-async def test_read_youtube_video_without_captions_falls_through(monkeypatch, settings):
+async def test_read_youtube_video_without_captions_falls_through(
+    monkeypatch, settings, capture_logs
+):
     _clear_provider_env(monkeypatch)
     _public_dns(monkeypatch)
     url = f"https://www.youtube.com/watch?v={VIDEO}"
@@ -368,7 +370,7 @@ async def test_read_youtube_video_without_captions_falls_through(monkeypatch, se
         return_value=httpx.Response(200, text="<html><body><div id='app'></div></body></html>")
     )
     jina_md = "# Test Video\n\n" + ("Video page content. " * 40)
-    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(200, text=jina_md))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(jina_md))
 
     pipe = Pipeline.build(settings)
     try:
@@ -379,3 +381,7 @@ async def test_read_youtube_video_without_captions_falls_through(monkeypatch, se
     assert outcome.provider == "jina"
     assert outcome.tried == ["youtube", "trafilatura", "jina"]
     assert outcome.failures[0] == ("youtube", "empty")
+    # The url-specific reader's failure gets its own log line; trafilatura's,
+    # an ordinary reader in the chain, does not.
+    assert sum(f"read url={url} -> youtube failed:" in m for m in capture_logs) == 1
+    assert not any("-> trafilatura failed:" in m for m in capture_logs)

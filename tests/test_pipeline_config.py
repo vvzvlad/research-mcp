@@ -229,6 +229,20 @@ def test_missing_proxy_does_not_disable_instance(monkeypatch):
     assert config.proxy is None
 
 
+def test_resolve_options_env_fills_only_the_set_vars(monkeypatch):
+    # options_env is always optional, like a proxy: a set var lands in options
+    # under its key, an unset one is left out and never disables the instance.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    config = _resolve_instance(_inst("instagram"))
+    assert config is not None
+    assert config.options == {}
+    monkeypatch.setenv("GROQ_PROXY", "socks5://proxy.invalid:1080")
+    config = _resolve_instance(_inst("instagram"))
+    assert config is not None
+    assert config.options == {"groq_proxy": "socks5://proxy.invalid:1080"}
+
+
 def test_build_threads_proxy_into_provider(monkeypatch, settings):
     # End-to-end: a configured proxy reaches the built provider instance.
     _clear_provider_env(monkeypatch)
@@ -253,7 +267,9 @@ def test_build_with_no_env_at_all(monkeypatch, settings):
     pipe = Pipeline.build(settings, client=httpx.AsyncClient())
     assert pipe.search_names == ["duckduckgo"]  # the only one that needs nothing
     assert isinstance(pipe._search[0], DuckDuckGoSearch)
-    assert pipe.read_names[0] == "trafilatura"  # its read-side counterpart
+    # Its read-side counterpart trafilatura, behind the keyless url-specific
+    # readers (instagram needs the Groq key, so it is off).
+    assert pipe.read_names == ["youtube", "instagram-profile", "trafilatura", "jina"]
     # Keyless means unbilled: an empty env must cost nothing.
     assert "duckduckgo" not in pipe._paid
 
@@ -267,6 +283,16 @@ def test_config_error_still_guards_an_empty_search_pipeline(monkeypatch, setting
     with pytest.raises(ConfigError) as ei:
         Pipeline.build(settings, client=httpx.AsyncClient())
     assert "search provider" in str(ei.value).lower()
+
+
+def test_config_error_guards_a_read_pipeline_of_url_specific_readers_only(monkeypatch, settings):
+    # youtube and instagram-profile are keyless and always on, so a read list
+    # that lost every general reader is not empty — and must still fail.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr("src.pipeline.READ_PIPELINE", ["youtube", "instagram-profile"])
+    with pytest.raises(ConfigError) as ei:
+        Pipeline.build(settings, client=httpx.AsyncClient())
+    assert "read provider" in str(ei.value).lower()
 
 
 def test_duckduckgo_instance_needs_no_variable(monkeypatch):

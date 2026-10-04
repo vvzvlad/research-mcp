@@ -1,4 +1,4 @@
-"""Parallel Search provider: response parsing, request body, paging, failures.
+"""Parallel Search provider: response parsing, request body, failures.
 
 The payload mirrors the ``V1SearchResponse`` shape documented on 2026-09-18 at
 https://docs.parallel.ai/api-reference/search-api/search (``search_id`` /
@@ -61,7 +61,7 @@ async def test_parses_results_and_joins_excerpts_into_one_snippet(make_config):
     )
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [(r.title, r.url, r.snippet, r.source) for r in results] == [
         (
             "First hit",
@@ -82,7 +82,7 @@ async def test_empty_results_list_is_a_normal_empty_answer(make_config):
     )
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        assert await provider.search(client, "q", 5, 1, None) == []
+        assert await provider.search(client, "q", 5, None) == []
 
 
 @respx.mock
@@ -92,7 +92,7 @@ async def test_missing_results_key_is_an_empty_result_list(make_config):
     )
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        assert await provider.search(client, "q", 5, 1, None) == []
+        assert await provider.search(client, "q", 5, None) == []
 
 
 @respx.mock
@@ -118,7 +118,7 @@ async def test_items_without_url_or_excerpts_are_handled(make_config):
     )
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [(r.url, r.snippet) for r in results] == [
         ("https://parallel.test/ok", ""),
         ("https://parallel.test/mixed", "kept"),
@@ -135,7 +135,7 @@ async def test_request_carries_the_api_key_header_and_the_documented_body(make_c
     )
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "python asyncio timeouts", 7, 1, None)
+        await provider.search(client, "python asyncio timeouts", 7, None)
     request = route.calls.last.request
     assert str(request.url) == PARALLEL_SEARCH_ENDPOINT
     assert request.method == "POST"
@@ -159,7 +159,7 @@ async def test_language_is_never_sent(make_config):
     )
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, "ru-RU")
+        await provider.search(client, "q", 5, "ru-RU")
     body = _body(route)
     assert "location" not in body["advanced_settings"]
     assert "language" not in body
@@ -178,40 +178,8 @@ async def test_max_results_is_clamped(make_config, num_results, expected):
     )
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", num_results, 1, None)
+        await provider.search(client, "q", num_results, None)
     assert _body(route)["advanced_settings"]["max_results"] == expected
-
-
-# -- paging ----------------------------------------------------------------
-
-
-@respx.mock
-async def test_second_page_is_refused_without_a_request(make_config):
-    # Parallel has no pagination: page 2 would repeat page 1's hits at full
-    # price, so it must fail instead of silently re-serving them.
-    route = respx.post(PARALLEL_SEARCH_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=PARALLEL_PAYLOAD)
-    )
-    provider = ParallelSearch(make_config("parallel_search", api_key="k"))
-    async with httpx.AsyncClient() as client:
-        with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 2, None)
-    assert "no pagination" in str(excinfo.value)
-    assert route.call_count == 0  # never reached the network
-
-
-@respx.mock
-@pytest.mark.parametrize("page", [0, -5, 1])
-async def test_first_or_non_positive_page_is_served(make_config, page):
-    # Nothing upstream bounds `page` from below, and there is no offset to send,
-    # so page 0 / a negative page is just the one page this API has.
-    route = respx.post(PARALLEL_SEARCH_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=PARALLEL_PAYLOAD)
-    )
-    provider = ParallelSearch(make_config("parallel_search", api_key="k"))
-    async with httpx.AsyncClient() as client:
-        assert len(await provider.search(client, "q", 5, page, None)) == 2
-    assert route.call_count == 1
 
 
 # -- failures --------------------------------------------------------------
@@ -223,7 +191,7 @@ async def test_payment_required_is_a_provider_error(make_config):
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "out of credits" in str(excinfo.value)
     assert route.call_count == 1  # 402 is never retried
 
@@ -236,7 +204,7 @@ async def test_invalid_json_is_a_provider_error(make_config):
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "invalid JSON" in str(excinfo.value)
 
 
@@ -263,7 +231,7 @@ async def test_long_excerpts_are_truncated_to_the_snippet_cap(make_config):
     respx.post(PARALLEL_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert len(results[0].snippet) == _SNIPPET_MAX_CHARS
 
 
@@ -285,5 +253,5 @@ async def test_a_snippet_exactly_at_the_cap_is_not_touched(make_config):
     respx.post(PARALLEL_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
     provider = ParallelSearch(make_config("parallel_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert results[0].snippet == "z" * _SNIPPET_MAX_CHARS

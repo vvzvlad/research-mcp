@@ -16,6 +16,7 @@ from src.providers import (  # noqa: F401  (imported for their @register side ef
     exa,
     firecrawl,
     firecrawl_search,
+    instagram,
     jina,
     jina_search,
     linkup_search,
@@ -28,4 +29,5 @@ from src.providers import (  # noqa: F401  (imported for their @register side ef
     trafilatura,
     xmlriver_search,
     youcom_search,
+    youtube,
 )

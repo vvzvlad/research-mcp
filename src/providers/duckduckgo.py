@@ -1,9 +1,9 @@
 """DuckDuckGo search provider — keyless, and the only one that needs no config.
 
 API: POST ``https://html.duckduckgo.com/html/`` with a form-encoded body
-``{"q": <query>, "kl": <region>}`` (plus ``s`` for deeper pages) and a browser
-User-Agent. This is the no-JS SERP: unlike duckduckgo.com itself it needs no
-``vqd`` token handshake, so ONE request returns the whole result page as HTML.
+``{"q": <query>, "kl": <region>}`` and a browser User-Agent. This is the no-JS
+SERP: unlike duckduckgo.com itself it needs no ``vqd`` token handshake, so ONE
+request returns the whole result page as HTML.
 
 Response shape: each hit is a ``.result`` row whose ``a.result__a`` carries the
 title text and the href, and whose ``.result__snippet`` carries the snippet. The
@@ -26,6 +26,7 @@ import httpx
 import lxml.etree
 import lxml.html
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import (
     BROWSER_USER_AGENT,
@@ -36,10 +37,6 @@ from src.providers.base import (
 from src.providers.registry import register
 
 DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
-
-# Results per SERP page. The endpoint's own "next page" form posts `s` as a
-# RESULT offset (not a page index), and one no-JS page carries 30 results.
-DDG_PAGE_SIZE = 30
 
 # `kl` value meaning "no region at all" — the default, and the fallback for a
 # language tag we cannot map.
@@ -145,7 +142,6 @@ class DuckDuckGoSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
         # Local throttle, SKIP semantics (same design as searxng and brave): if
@@ -173,7 +169,8 @@ class DuckDuckGoSearch:
         now = time.monotonic()
         if now - self._last_call < _MIN_INTERVAL_SECONDS:
             raise ProviderError(
-                f"{self.name}: throttled (min interval {_MIN_INTERVAL_SECONDS:.0f}s)"
+                f"{self.name}: throttled (min interval {_MIN_INTERVAL_SECONDS:.0f}s)",
+                reason=failure_reason.RATE_LIMIT,
             )
         self._last_call = now
 
@@ -183,10 +180,6 @@ class DuckDuckGoSearch:
             "q": query,
             "kl": _ddg_region(language) if language else DDG_REGION_ANY,
         }
-        # Page 1 omits `s` entirely, exactly like the endpoint's own first
-        # request; `page > 1` also covers page <= 0 (nothing upstream clamps it).
-        if page > 1:
-            data["s"] = str((page - 1) * DDG_PAGE_SIZE)
         response = await request_with_retry(
             client,
             "POST",
@@ -208,7 +201,9 @@ class DuckDuckGoSearch:
         # itself — otherwise the block would reach _parse and be reported as
         # broken markup.
         if response.status_code == 202:
-            raise ProviderError(f"{self.name}: rate limited (HTTP 202)")
+            raise ProviderError(
+                f"{self.name}: rate limited (HTTP 202)", reason=failure_reason.RATE_LIMIT
+            )
         return self._parse(response.text)
 
     def _parse(self, html: str) -> list[SearchResult]:

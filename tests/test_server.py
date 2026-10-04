@@ -35,8 +35,8 @@ class FakePipeline:
     def _body(self, url: str) -> str:
         return self._markdown if self._markdown is not None else f"# Markdown of {url}"
 
-    async def search(self, query, num_results, page, language):
-        self.search_args = (query, num_results, page, language)
+    async def search(self, query, num_results, language):
+        self.search_args = (query, num_results, language)
         hit = SearchResult(title="Hit", url="https://x.test", snippet="snip", source="searxng")
         return SearchOutcome(
             results=[hit],
@@ -72,11 +72,11 @@ class FakePipeline:
             elapsed_ms=1500,
         )
 
-    async def search_and_read(self, query, num_results, page, language, candidates):
+    async def search_and_read(self, query, num_results, language, candidates):
         # Canned outcome: the wave/over-fetch logic itself is the pipeline's and
         # is covered against respx in tests/test_pipeline.py.
-        self.search_and_read_args = (query, num_results, page, language, candidates)
-        search = await self.search(query, candidates, page, language)
+        self.search_and_read_args = (query, num_results, language, candidates)
+        search = await self.search(query, candidates, language)
         items = [
             ReadItem(
                 title="Hit",
@@ -114,8 +114,8 @@ class EmptySearchPipeline(FakePipeline):
         super().__init__()
         self._dead = dead
 
-    async def search(self, query, num_results, page, language):
-        self.search_args = (query, num_results, page, language)
+    async def search(self, query, num_results, language):
+        self.search_args = (query, num_results, language)
         return SearchOutcome(
             results=[],
             attempted=["searxng", "serper"],
@@ -128,9 +128,9 @@ class EmptySearchPipeline(FakePipeline):
             elapsed_ms=900,
         )
 
-    async def search_and_read(self, query, num_results, page, language, candidates):
-        self.search_and_read_args = (query, num_results, page, language, candidates)
-        search = await self.search(query, candidates, page, language)
+    async def search_and_read(self, query, num_results, language, candidates):
+        self.search_and_read_args = (query, num_results, language, candidates)
+        search = await self.search(query, candidates, language)
         return SearchReadOutcome(items=[], search=search, candidates=0, read_attempts=0)
 
 
@@ -142,6 +142,13 @@ def server(settings):
 async def test_four_tools_registered(server):
     tools = {t.name for t in await server.list_tools()}
     assert tools == {"web_search", "read_page", "read_pages", "search_and_read"}
+
+
+async def test_search_tools_take_no_page_argument(server):
+    # Paging was removed: a deeper result list is what num_results is for.
+    by_name = {t.name: t for t in await server.list_tools()}
+    for name in ("web_search", "search_and_read"):
+        assert "page" not in by_name[name].inputSchema["properties"], name
 
 
 async def test_descriptions_are_verbatim_english(server):
@@ -463,11 +470,11 @@ async def test_search_and_read_over_fetches_candidates(settings):
     srv = build_server(settings, pipeline=pipe)
     await _call(srv, "search_and_read", {"query": "q", "num_results": 3})
     assert pipe.search_and_read_args[1] == 3  # pages requested
-    assert pipe.search_and_read_args[4] == 8  # 3 * 2 + 2 candidates
+    assert pipe.search_and_read_args[3] == 8  # 3 * 2 + 2 candidates
     # ...and the over-fetch never exceeds what one search may return.
     await _call(srv, "search_and_read", {"query": "q", "num_results": 40})
     assert pipe.search_and_read_args[1] == 20  # capped at READ_PAGES_MAX
-    assert pipe.search_and_read_args[4] == min(42, SEARCH_RESULTS_MAX)
+    assert pipe.search_and_read_args[3] == min(42, SEARCH_RESULTS_MAX)
 
 
 async def test_numeric_string_arguments_are_accepted(settings):
@@ -475,12 +482,11 @@ async def test_numeric_string_arguments_are_accepted(settings):
     pipe = FakePipeline()
     srv = build_server(settings, pipeline=pipe)
 
-    await _call(srv, "search_and_read", {"query": "q", "num_results": "8", "page": "2"})
+    await _call(srv, "search_and_read", {"query": "q", "num_results": "8"})
     assert pipe.search_and_read_args[1] == 8
-    assert pipe.search_and_read_args[2] == 2
 
-    await _call(srv, "web_search", {"query": "q", "num_results": "8", "page": "2"})
-    assert pipe.search_args == ("q", 8, 2, None)
+    await _call(srv, "web_search", {"query": "q", "num_results": "8"})
+    assert pipe.search_args == ("q", 8, None)
 
     # The tolerance is only for numbers: a non-numeric string is still a clean
     # validation error, not something silently coerced.

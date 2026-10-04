@@ -37,7 +37,6 @@ class ExaSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
         capped = max(1, min(num_results, EXA_NUM_RESULTS_MAX))

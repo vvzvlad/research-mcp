@@ -1,9 +1,9 @@
 """YouTube video transcripts via YouTube's own player API.
 
-Not a registered provider — like ``pdf.py`` it is invoked directly by the read
-pipeline: ``Pipeline.read`` asks ``video_id`` whether a url is a YouTube video
-and, if it is, tries ``fetch_transcript`` before the probe. A plain fetch of a
-watch page yields only the page chrome; the transcript lives behind two calls:
+The ``youtube`` read provider (``YouTubeRead``), a ``UrlSpecificReader``: it
+accepts only the urls ``video_id`` recognises as a YouTube video, and the read
+pipeline offers it those before the probe. A plain fetch of a watch page yields
+only the page chrome; the transcript lives behind two calls:
 
 1. ``POST /youtubei/v1/player`` as the ANDROID client (the one
    youtube-transcript-api 1.2.4 uses — the WEB client answers UNPLAYABLE) →
@@ -24,8 +24,10 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
+from src import failure_reason
 from src.providers._http import request_with_retry
-from src.providers.base import ProviderError
+from src.providers.base import ProviderConfig, ProviderError
+from src.providers.registry import register
 
 PLAYER_ENDPOINT = "https://www.youtube.com/youtubei/v1/player"
 
@@ -200,15 +202,18 @@ async def fetch_transcript(client: httpx.AsyncClient, video_id: str, retries: in
     if status != "OK":
         reason = playability.get("reason") or ""
         if "not a bot" in reason.lower():
-            # src.failure_reason.classify keys on the "bot protection" wording.
-            raise ProviderError(f"youtube: blocked by bot protection ({status}: {reason})")
+            raise ProviderError(
+                f"youtube: blocked by bot protection ({status}: {reason})",
+                reason=failure_reason.BOT_PROTECTION,
+            )
         raise ProviderError(f"youtube: video not playable ({status}: {reason})")
 
     renderer = (player.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {}
     tracks = renderer.get("captionTracks") or []
     if not tracks:
-        # "empty response" is the wording classify() maps to `empty`.
-        raise ProviderError("youtube: empty response (the video has no captions)")
+        raise ProviderError(
+            "youtube: empty response (the video has no captions)", reason=failure_reason.EMPTY
+        )
     track = _pick_track(player, tracks)
 
     # The srv3 format is a richer XML with per-word timing; without the
@@ -222,7 +227,10 @@ async def fetch_transcript(client: httpx.AsyncClient, video_id: str, retries: in
     )
     snippets = _parse_snippets(timedtext.content)
     if not snippets:
-        raise ProviderError("youtube: empty response (the caption track has no text)")
+        raise ProviderError(
+            "youtube: empty response (the caption track has no text)",
+            reason=failure_reason.EMPTY,
+        )
 
     details = player.get("videoDetails") or {}
     caption_name = "".join(run.get("text", "") for run in (track.get("name") or {}).get("runs", []))
@@ -238,3 +246,19 @@ async def fetch_transcript(client: httpx.AsyncClient, video_id: str, retries: in
         lines += ["## Description", "", description, ""]
     lines += ["## Transcript", "", "\n\n".join(_paragraphs(snippets))]
     return "\n".join(lines)
+
+
+@register("youtube")
+class YouTubeRead:
+    """Read a YouTube video url as its transcript (no key needed)."""
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self.name = config.name
+        self.proxy = config.proxy
+        self._config = config
+
+    def accepts(self, url: str) -> bool:
+        return video_id(url) is not None
+
+    async def read(self, client: httpx.AsyncClient, url: str) -> str:
+        return await fetch_transcript(client, video_id(url), self._config.retries)

@@ -1,4 +1,4 @@
-"""You.com search provider: response parsing, request shape, paging, failures.
+"""You.com search provider: response parsing, request shape, failures.
 
 The payload mirrors the response documented on 2026-09-18 at
 https://you.com/docs/api-reference/search (``results.web[]`` with ``url`` /
@@ -18,7 +18,6 @@ from src.providers.base import ProviderError
 from src.providers.youcom_search import (
     YOUCOM_COUNT_MAX,
     YOUCOM_ENDPOINT,
-    YOUCOM_OFFSET_MAX,
     _YOUCOM_LANGS,
     YouComSearch,
 )
@@ -61,7 +60,7 @@ async def test_parses_web_results_with_description_as_snippet(make_config):
     respx.post(YOUCOM_ENDPOINT).mock(return_value=httpx.Response(200, json=YOUCOM_PAYLOAD))
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [(r.title, r.url, r.snippet, r.source) for r in results] == [
         ("First hit", "https://youcom.test/1", "snippet one", "youcom"),
         ("Second hit", "https://youcom.test/2", "snippet two", "youcom"),
@@ -88,7 +87,7 @@ async def test_snippets_array_is_used_when_description_is_missing(make_config):
     )
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [r.snippet for r in results] == ["fragment a fragment b"]
 
 
@@ -105,7 +104,7 @@ async def test_response_without_web_results_is_a_normal_empty_answer(make_config
     respx.post(YOUCOM_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
-        assert await provider.search(client, "q", 5, 1, None) == []
+        assert await provider.search(client, "q", 5, None) == []
 
 
 @respx.mock
@@ -126,7 +125,7 @@ async def test_items_without_url_are_skipped(make_config):
     )
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [r.url for r in results] == ["https://youcom.test/ok"]
 
 
@@ -140,13 +139,13 @@ async def test_posts_json_body_with_api_key_header(make_config):
     )
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "тест", 5, 1, None)
+        await provider.search(client, "тест", 5, None)
     request = route.calls.last.request
     assert request.method == "POST"
     assert str(request.url) == YOUCOM_ENDPOINT
     assert request.headers["X-API-Key"] == "k"
     assert request.headers["Content-Type"] == "application/json"
-    assert _sent_body(route) == {"query": "тест", "count": 5, "offset": 0}
+    assert _sent_body(route) == {"query": "тест", "count": 5}
     # No language given → the key is absent; country is never sent at all.
     assert "language" not in _sent_body(route)
     assert "country" not in _sent_body(route)
@@ -159,7 +158,7 @@ async def test_count_is_capped_at_the_documented_hundred(make_config):
     )
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 500, 1, None)
+        await provider.search(client, "q", 500, None)
     assert _sent_body(route)["count"] == YOUCOM_COUNT_MAX
 
 
@@ -170,52 +169,8 @@ async def test_zero_num_results_is_raised_to_one(make_config):
     )
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 0, 1, None)
+        await provider.search(client, "q", 0, None)
     assert _sent_body(route)["count"] == 1
-
-
-@respx.mock
-async def test_offset_is_the_zero_based_page_index(make_config):
-    route = respx.post(YOUCOM_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=YOUCOM_PAYLOAD)
-    )
-    provider = YouComSearch(make_config("youcom", api_key="k"))
-    async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, None)  # page 1 → offset 0
-        assert _sent_body(route)["offset"] == 0
-        await provider.search(client, "q", 5, 3, None)  # page 3 → offset 2
-        assert _sent_body(route)["offset"] == 2
-        # Page 10 is the deepest one the API serves and goes through unchanged.
-        await provider.search(client, "q", 5, YOUCOM_OFFSET_MAX + 1, None)
-    assert _sent_body(route)["offset"] == YOUCOM_OFFSET_MAX
-
-
-@respx.mock
-@pytest.mark.parametrize("page", [0, -5])
-async def test_non_positive_page_is_clamped_to_the_first_offset(make_config, page):
-    route = respx.post(YOUCOM_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=YOUCOM_PAYLOAD)
-    )
-    provider = YouComSearch(make_config("youcom", api_key="k"))
-    async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, page, None)
-    assert _sent_body(route)["offset"] == 0
-
-
-@respx.mock
-async def test_page_beyond_the_documented_depth_is_refused(make_config):
-    # `offset` is capped at 9 upstream, so page 11+ is refused locally instead
-    # of being clamped to page 10 (which would re-serve page 10's hits and bill
-    # another call).
-    route = respx.post(YOUCOM_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=YOUCOM_PAYLOAD)
-    )
-    provider = YouComSearch(make_config("youcom", api_key="k"))
-    async with httpx.AsyncClient() as client:
-        with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, YOUCOM_OFFSET_MAX + 2, None)
-    assert "beyond you.com's depth" in str(excinfo.value)
-    assert route.call_count == 0  # never reached the network
 
 
 # -- language normalisation ------------------------------------------------
@@ -242,7 +197,7 @@ async def test_language_is_mapped_onto_an_accepted_enum_value(
     )
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, language)
+        await provider.search(client, "q", 5, language)
     assert _sent_body(route)["language"] == expected
 
 
@@ -257,7 +212,7 @@ async def test_unmappable_language_omits_the_field_entirely(make_config, languag
     )
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, language)
+        await provider.search(client, "q", 5, language)
     assert "language" not in _sent_body(route)
 
 
@@ -287,7 +242,7 @@ async def test_payment_required_is_a_provider_error(make_config):
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "out of credits" in str(excinfo.value)
     assert route.call_count == 1  # 402 is not retried
 
@@ -300,7 +255,7 @@ async def test_non_json_body_is_a_provider_error(make_config):
     provider = YouComSearch(make_config("youcom", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "invalid JSON" in str(excinfo.value)
 
 

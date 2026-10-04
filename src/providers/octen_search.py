@@ -14,8 +14,7 @@ ISO 639-1 codes from a closed 18-value enum, default ``[]`` = no filter),
 ``include_text`` / ``exclude_text``, ``highlight`` (``{enable: true,
 max_tokens: 512}`` by default), ``full_content`` (off by default), ``format``
 (``markdown``/``text``, default ``text``), ``safesearch`` (default ``strict``),
-``include_images``. There is no page/offset/cursor field: ``count`` is the only
-volume knob.
+``include_images``. ``count`` is the only volume knob.
 
 Response: ``{"code", "msg", "request_id", "data", "meta"}`` where ``code: 0``
 means success, ``data`` is ``{"query", "results": [...]}`` and every result has
@@ -110,17 +109,8 @@ class OctenSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
-        # No pagination in the API: page 2+ would re-run the same search and bill
-        # for the hits the caller already has, so refuse rather than silently
-        # hand back page 1 (same rule as brave beyond its depth limit).
-        if page > 1:
-            raise ProviderError(
-                f"{self.name}: page {page} is unavailable (octen has no pagination)"
-            )
-
         body: dict[str, Any] = {
             "query": query,
             "count": max(OCTEN_COUNT_MIN, min(num_results, OCTEN_COUNT_MAX)),

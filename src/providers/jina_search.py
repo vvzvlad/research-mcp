@@ -10,8 +10,7 @@ no-content``. The ``no-content`` header asks for the SERP only
 the full page contents, which is slow, expensive, and redundant next to our
 own read pipeline.
 
-JSON body: ``q`` (required); optional ``num`` (results per page), ``page``
-(pagination — semantics ambiguous, see the in-code comment), ``hl``
+JSON body: ``q`` (required); optional ``num`` (results per page), ``hl``
 (two-letter language code), ``gl`` / ``location`` (never sent, see below).
 
 Response is the reader-style envelope ``{"code": 200, "status": ...,
@@ -55,7 +54,6 @@ class JinaSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
         body: dict[str, object] = {"q": query}
@@ -79,16 +77,6 @@ class JinaSearch:
         # country input, and deriving one from `language` would be wrong for
         # languages spoken in many countries (en, es, ru, ...) — the same
         # reasoning as brave.py's `country` comment.
-        if page > 1:
-            # The docs are ambiguous about `page`: the NAME suggests a 1-based
-            # page index, but the description reads "The result offset. It
-            # skips the given number of results. It's used for pagination." —
-            # a skip-count. We cannot live-test which reading wins, so the raw
-            # page number goes through as-is: deep pagination through jina is
-            # a rare path, and the within-call dedup in Pipeline.search()
-            # absorbs a wrong guess (re-served hits collapse against the other
-            # providers' pages).
-            body["page"] = page
         response = await request_with_retry(
             client,
             "POST",

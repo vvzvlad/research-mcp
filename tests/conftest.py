@@ -101,6 +101,26 @@ def _mock_duckduckgo_no_results() -> None:
     )
 
 
+def _jina_answer(
+    content: str, *, http_status: int = 200, warning: str | None = None
+) -> httpx.Response:
+    """A Jina Reader answer in the JSON envelope ``Accept: application/json`` gets.
+
+    The shape measured live 2026-10-04: HTTP 200 whatever the site said, the
+    Markdown in ``data.content``, the target site's status in
+    ``data.httpStatus``, and ``data.warning`` only when jina has one.
+    """
+    data: dict[str, object] = {
+        "title": "",
+        "url": "",
+        "content": content,
+        "httpStatus": http_status,
+    }
+    if warning is not None:
+        data["warning"] = warning
+    return httpx.Response(200, json={"code": 200, "status": 20000, "data": data, "meta": {}})
+
+
 @pytest.fixture
 def capture_logs():
     """Capture loguru messages into a list of formatted strings for the test.
