@@ -186,6 +186,22 @@ class JinaRead:
             raise ProviderError(f"{self.name}: invalid JSON response")
         content = data.get("content")
         text = content.strip() if isinstance(content, str) else ""
+        if text:
+            # The plain-text answer led with the page's title, source url and
+            # publication date; JSON mode moves them into fields, so put them
+            # back in front of the body. Only in front of a body: a header
+            # alone must not turn an empty answer into a non-empty one.
+            header = [
+                f"{label}: {value}"
+                for label, value in (
+                    ("Title", data.get("title")),
+                    ("URL Source", data.get("url")),
+                    ("Published Time", data.get("publishedTime")),
+                )
+                if isinstance(value, str) and value.strip()
+            ]
+            if header:
+                text = "\n\n".join([*header, f"Markdown Content:\n{text}"])
         return _Answer(text, _refusal(data))
 
     async def read(self, client: httpx.AsyncClient, url: str) -> str:

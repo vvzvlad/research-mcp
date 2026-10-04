@@ -25,6 +25,7 @@ import respx
 
 from src.pipeline import Pipeline
 from src.providers import searxng as searxng_module
+from src import failure_reason
 from src.providers.base import ProviderError
 from src.providers.searxng import _MIN_INTERVAL_SECONDS, SearxngSearch
 from tests.conftest import _clear_provider_env, _mock_duckduckgo_rate_limited
@@ -87,6 +88,7 @@ async def test_second_call_within_interval_is_throttled(make_config, clock):
         with pytest.raises(ProviderError) as excinfo:
             await provider.search(client, "q", 5, None)
     assert "throttled" in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.RATE_LIMIT
     assert route.call_count == 1  # the skipped query never hit the network
 
 

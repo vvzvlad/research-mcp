@@ -747,13 +747,14 @@ class Pipeline:
             tried.append(provider.name)
             try:
                 content = await self._read_one(provider, url, probe_html)
-            except ProviderError as exc:
-                errors.append(str(exc))
-                failures.append((provider.name, failure_reason.classify(exc)))
-                continue
             except Exception as exc:  # noqa: BLE001 — treat as provider failure
-                errors.append(f"{provider.name}: {exc}")
+                errors.append(str(exc) if isinstance(exc, ProviderError) else f"{provider.name}: {exc}")
                 failures.append((provider.name, failure_reason.classify(exc)))
+                if specific:
+                    # A failed transcript is hidden behind whatever the chain
+                    # reads next, so it gets its own line: otherwise a youtube
+                    # that flags our egress as a bot shows only in `tried=`.
+                    logger.info("read url={} -> {} failed: {}", url, provider.name, exc)
                 continue
             # Returned without raising → a billed 200 (even if too thin). One
             # jina success may hide up to three extra billed upstream calls

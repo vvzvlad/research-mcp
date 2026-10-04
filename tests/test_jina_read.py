@@ -723,3 +723,43 @@ async def test_error_quoted_in_the_article_body_is_not_a_refusal(make_config):
         out = await provider.read(client, URL)
     assert out == content.strip()
     assert route.call_count == 1
+
+
+@respx.mock
+async def test_title_source_and_date_lead_the_body(make_config):
+    # JSON mode moves the plain answer's header into fields; the reader puts
+    # them back in front of the body, as the model used to see them.
+    body = {
+        "code": 200,
+        "status": 20000,
+        "data": {
+            "title": "A Title",
+            "url": URL,
+            "publishedTime": "Fri, 02 Oct 2026 16:11:13 GMT",
+            "content": "Body text.",
+            "httpStatus": 200,
+        },
+    }
+    respx.get(READER_URL).mock(return_value=httpx.Response(200, json=body))
+    provider = JinaRead(make_config("jina", fallback_min_chars=0))
+    async with httpx.AsyncClient() as client:
+        text = await provider.read(client, URL)
+    assert text == (
+        f"Title: A Title\n\nURL Source: {URL}\n\n"
+        "Published Time: Fri, 02 Oct 2026 16:11:13 GMT\n\nMarkdown Content:\nBody text."
+    )
+
+
+@respx.mock
+async def test_header_alone_is_still_an_empty_answer(make_config):
+    body = {
+        "code": 200,
+        "status": 20000,
+        "data": {"title": "A Title", "url": URL, "content": "  ", "httpStatus": 200},
+    }
+    respx.get(READER_URL).mock(return_value=httpx.Response(200, json=body))
+    provider = JinaRead(make_config("jina", fallback_min_chars=0))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.read(client, URL)
+    assert "empty response" in str(excinfo.value)

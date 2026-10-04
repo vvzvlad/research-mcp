@@ -285,6 +285,16 @@ def test_config_error_still_guards_an_empty_search_pipeline(monkeypatch, setting
     assert "search provider" in str(ei.value).lower()
 
 
+def test_config_error_guards_a_read_pipeline_of_url_specific_readers_only(monkeypatch, settings):
+    # youtube and instagram-profile are keyless and always on, so a read list
+    # that lost every general reader is not empty — and must still fail.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr("src.pipeline.READ_PIPELINE", ["youtube", "instagram-profile"])
+    with pytest.raises(ConfigError) as ei:
+        Pipeline.build(settings, client=httpx.AsyncClient())
+    assert "read provider" in str(ei.value).lower()
+
+
 def test_duckduckgo_instance_needs_no_variable(monkeypatch):
     # The whole contract of this instance is the absence of config: any env name
     # added here would silently make it switchable off again.

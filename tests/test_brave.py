@@ -19,6 +19,7 @@ import pytest
 import respx
 
 from src.providers import brave as brave_module
+from src import failure_reason
 from src.providers.base import ProviderError
 from src.providers.brave import (
     BRAVE_COUNT_MAX,
@@ -232,6 +233,7 @@ async def test_second_call_within_interval_is_throttled(make_config, clock):
         with pytest.raises(ProviderError) as excinfo:
             await provider.search(client, "q", 5, None)
     assert "throttled" in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.RATE_LIMIT
     assert route.call_count == 1  # the skipped query never hit the network
 
 
