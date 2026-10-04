@@ -12,26 +12,22 @@ file under `data/` (kept on a volume).
 ## Works with zero keys
 
 `make run` on an empty `.env` is enough — **no key, no SearXNG, nothing to deploy
-first.** Two instances need no configuration at all and are therefore always
-enabled: **`duckduckgo`** (search — the no-JS `html.duckduckgo.com` SERP, one
-request per query, no token handshake) and **`trafilatura`** (read — local
-HTML→Markdown extraction). Together they are the floor: search and read both
-work out of the box.
+first.** Two instances need no configuration at all: **`duckduckgo`** (search —
+the no-JS `html.duckduckgo.com` SERP, one request per query, no token handshake)
+and **`trafilatura`** (read — local HTML→Markdown extraction). Together they are
+the floor: search and read both work out of the box.
 
 Everything else is an upgrade on top of that floor. A self-hosted **SearXNG**
-(`SEARXNG_URL`) is *optional*; when it is configured it sits **ahead** of
-DuckDuckGo in the pipeline, so SearXNG keeps its copy of every url both of them
-return and DuckDuckGo only adds what nobody ahead of it had. (With the reranker
-on — the default once `JINA_API_KEY` is set — the merged list is reordered by
-relevance across all sources before the trim, so the final ordering can still
-change.) Every paid vendor lights up the moment its key appears.
+(`SEARXNG_URL`) is *optional*; when it is configured it **replaces** `duckduckgo`:
+ours queries the same DuckDuckGo from the same IP, so running both only doubled
+the hits that earn a block. Every paid vendor lights up the moment its key
+appears.
 
 The floor is deliberately modest: DuckDuckGo is a scraped SERP, not an API, so it
 paces itself to one query per 45s (skipping, never waiting, when the slot is
 taken) and reports a block or a captcha as a failure rather than as an empty
 result set. That pace is the one measured for this upstream: DuckDuckGo blocks
-by IP for 7-8 minutes after a burst, and a block taken here would also silence
-a SearXNG that reaches DuckDuckGo over the same address.
+by IP for 7-8 minutes after a burst.
 
 ## Tools
 
@@ -136,10 +132,11 @@ the body and logged as `out of credits` too, so an unpaid account never reads as
 a broken API.
 
 An instance is **enabled** only if its required env var(s) are set; otherwise it
-is skipped with a log line. `duckduckgo` and `trafilatura` need no config (always
-on); `jina` works keyless (its key is optional). At startup the server requires at
-least one search and one read instance — a condition those two always satisfy, so
-the check now only catches a broken `pipeline_config.py`.
+is skipped with a log line. `duckduckgo` and `trafilatura` need no config
+(`duckduckgo` steps aside for `SEARXNG_URL`); `jina` works keyless (its key is
+optional). At startup the server requires at least one search and one read
+instance — a condition always satisfied (by searxng or duckduckgo, and by
+trafilatura), so the check now only catches a broken `pipeline_config.py`.
 
 ## Adding a provider
 
@@ -176,7 +173,9 @@ addresses, which are blocked by default). The `read_pages`
 per-call url cap is a fixed `20` (hard constant, matching the tool description) —
 not configurable.
 
-Provider env vars — `duckduckgo` and `trafilatura` take none and are always on;
+Provider env vars — `duckduckgo` and `trafilatura` take none and are on by
+default (`duckduckgo` steps aside when `SEARXNG_URL` is set: SearXNG queries the
+same DuckDuckGo, and running both only doubles the hits that get us blocked);
 everything below is optional on top of them: `SEARXNG_URL`, `BRAVE_API_KEY`,
 `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`
 (one key enables the `jina` reader in keyed mode, the `jina-search` provider and

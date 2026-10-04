@@ -62,10 +62,6 @@ def test_search_pipeline_order():
     # proven paid workhorse jina-search, then the vendors we hold no key for
     # yet, cheapest first, then serper (dead balance, kept wired) and exa (the
     # most expensive).
-    #
-    # duckduckgo's slot right behind searxng is the load-bearing one: it is the
-    # only always-on search instance, so a deployment that DOES run SearXNG must
-    # keep seeing SearXNG's copy of every shared url, not DuckDuckGo's.
     assert SEARCH_PIPELINE == [
         "searxng",
         "duckduckgo",
@@ -161,8 +157,8 @@ def test_build_enables_brave_from_its_key(monkeypatch, settings):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("BRAVE_API_KEY", "k")
     pipe = Pipeline.build(settings, client=httpx.AsyncClient())
-    # duckduckgo needs no ENV, so it is always there alongside whatever a key
-    # turned on — that is the point of it, see test_build_with_no_env_at_all.
+    # duckduckgo needs no ENV and SEARXNG_URL is unset here, so it is on next to
+    # whatever a key turned on — see test_build_with_no_env_at_all.
     assert pipe.search_names == ["duckduckgo", "brave"]
     brave = next(p for p in pipe._search if p.name == "brave")
     assert isinstance(brave, BraveSearch)
@@ -175,7 +171,7 @@ def test_build_enables_jina_search_from_the_shared_jina_key(monkeypatch, setting
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("JINA_API_KEY", "k")
     pipe = Pipeline.build(settings, client=httpx.AsyncClient())
-    assert pipe.search_names == ["duckduckgo", "jina-search"]  # duckduckgo is always on
+    assert pipe.search_names == ["duckduckgo", "jina-search"]  # no SEARXNG_URL → duckduckgo on
     jina_search = next(p for p in pipe._search if p.name == "jina-search")
     assert isinstance(jina_search, JinaSearch)
     assert "jina" in pipe.read_names  # the same key feeds the reader
@@ -296,16 +292,23 @@ def test_config_error_guards_a_read_pipeline_of_url_specific_readers_only(monkey
 
 
 def test_duckduckgo_instance_needs_no_variable(monkeypatch):
-    # The whole contract of this instance is the absence of config: any env name
-    # added here would silently make it switchable off again.
+    # The contract of this instance: no variable is REQUIRED. The only one it
+    # names is SEARXNG_URL, the one that switches it off — our SearXNG queries
+    # the same DuckDuckGo from the same IP.
     ddg = _inst("duckduckgo")
     assert ddg.type == "duckduckgo"
     assert ddg.url_env is None
     assert ddg.api_key_env is None
     assert ddg.token_env is None
     assert ddg.proxy_env is None
+    assert ddg.disabled_by_env == "SEARXNG_URL"
     _clear_provider_env(monkeypatch)
     assert _resolve_instance(ddg) is not None  # enabled on an empty environment
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    assert _resolve_instance(ddg) is None  # SearXNG takes over
+    # A blank `SEARXNG_URL=` line in .env leaves searxng off, so the floor stays.
+    monkeypatch.setenv("SEARXNG_URL", "")
+    assert _resolve_instance(ddg) is not None
 
 
 def test_build_enables_expected_instances(monkeypatch, settings):
@@ -313,9 +316,10 @@ def test_build_enables_expected_instances(monkeypatch, settings):
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
     monkeypatch.setenv("TAVILY_2_API_KEY", "t2")
     pipe = Pipeline.build(settings, client=httpx.AsyncClient())
-    # searxng among the keyed search instances, with the always-on duckduckgo
-    # behind it; trafilatura+jina always-on plus tavily-2 on the read side.
-    assert pipe.search_names == ["searxng", "duckduckgo"]
+    # searxng alone: duckduckgo steps aside when SEARXNG_URL is set (both would
+    # hit the same DuckDuckGo from one IP); trafilatura+jina always-on plus
+    # tavily-2 on the read side.
+    assert pipe.search_names == ["searxng"]
     assert "trafilatura" in pipe.read_names
     assert "jina" in pipe.read_names
     assert "tavily-2" in pipe.read_names

@@ -63,9 +63,7 @@ _DDG_REGIONS = {
 # the one measured against this very upstream from this very egress IP, and it
 # lives in searxng.py (prod, 2026-08-09 — DuckDuckGo cuts us off after ~4
 # back-to-back queries and holds the block for 7-8 minutes; at a 45s gap 8 of 8
-# came back whole). A faster pace here would not only cost us this instance: our
-# SearXNG reaches DuckDuckGo over the same address, and DuckDuckGo is the only
-# engine it still has, so a block taken here takes the main search down with it.
+# came back whole).
 _MIN_INTERVAL_SECONDS = 45.0
 
 
@@ -122,8 +120,8 @@ def _unwrap_href(href: str) -> str:
 class DuckDuckGoSearch:
     """Keyless web search via the no-JS DuckDuckGo SERP (no config at all).
 
-    Always enabled — it is the search half of the zero-config floor, next to the
-    ``trafilatura`` reader. Rate-limited locally to one query per
+    Enabled unless SEARXNG_URL is set — it is the search half of the zero-config
+    floor, next to the ``trafilatura`` reader. Rate-limited locally to one query per
     ``_MIN_INTERVAL_SECONDS`` — by SKIPPING, never by waiting (see ``search``).
     """
 

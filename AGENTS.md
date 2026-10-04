@@ -34,10 +34,13 @@ a volume across restarts/image updates).
   trafilatura/jina/crawl4ai/tavily/firecrawl/brightdata (read). searxng,
   duckduckgo and brave self-throttle locally (one query per 45s / 45s / 1.1s) and
   SKIP — never sleep — when the slot is taken.
-- `duckduckgo` and `trafilatura` are the ZERO-CONFIG FLOOR: neither names an ENV
-  var, both are always enabled, so the server builds and both tools work on a
-  completely empty environment. `duckduckgo` scrapes the no-JS
-  `html.duckduckgo.com/html/` SERP with lxml (no key, no `vqd` handshake); it
+- `duckduckgo` and `trafilatura` are the ZERO-CONFIG FLOOR: neither needs an ENV
+  var, so the server builds and both tools work on a completely empty
+  environment. `duckduckgo` steps aside when `SEARXNG_URL` is set
+  (`Instance.disabled_by_env`): our SearXNG queries the same DuckDuckGo from the
+  same IP, so running both only doubles the hits that earn a block.
+  `duckduckgo` scrapes the no-JS `html.duckduckgo.com/html/` SERP with lxml (no
+  key, no `vqd` handshake); it
   treats HTTP 202 as a rate-limit block, and raises `ProviderError` — never
   returns `[]` — for a block, a captcha, a redesign, or a page where not one
   row's href could be read. An empty list means only that the search ran and left
