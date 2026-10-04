@@ -96,7 +96,6 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
             "- query: the search query. One query = one topic; for different topics "
             "call it separately.\n"
             "- num_results: how many results to return (default 8, maximum 50).\n"
-            "- page: result page number (default 1) — for deeper results.\n"
             '- language: language code to prioritise (e.g. "ru", "en"); unrestricted '
             "by default.\n\n"
             "This is ONLY search, it does NOT read pages. To get the content, take a "
@@ -111,15 +110,14 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
     async def web_search(
         query: str,
         num_results: int = 8,
-        page: int = 1,
         language: str | None = None,
     ) -> str:
         count = max(1, min(num_results, SEARCH_RESULTS_MAX))
         try:
-            outcome = await pipeline.search(query, count, page, language)
+            outcome = await pipeline.search(query, count, language)
         except ProviderError as exc:
             return str(exc)
-        body = format_search_results(outcome, query=query, page=page)
+        body = format_search_results(outcome, query=query)
         # The status line rides under every answer, including the "nothing
         # found" / "search is broken" texts — that is exactly when the model
         # needs to know how many instances were behind the verdict.
@@ -231,7 +229,6 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
             "- query: the search query. One query = one topic; for different topics "
             "call it separately.\n"
             "- num_results: how many READ pages to return (default 5, maximum 20).\n"
-            "- page: result page number (default 1).\n"
             '- language: language code to prioritise (e.g. "ru", "en"); unrestricted '
             "by default.\n\n"
             "How it works: the search is over-fetched (some urls will not open), the "
@@ -252,7 +249,6 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
     async def search_and_read(
         query: str,
         num_results: int = SEARCH_AND_READ_DEFAULT,
-        page: int = 1,
         language: str | None = None,
     ) -> dict[str, Any]:
         # Every result costs a real read, so the per-call cap is the read one.
@@ -262,7 +258,7 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
         # request lives here, so the pipeline is handed the final number.
         candidates = min(count * 2 + 2, SEARCH_RESULTS_MAX)
         try:
-            outcome = await pipeline.search_and_read(query, count, page, language, candidates)
+            outcome = await pipeline.search_and_read(query, count, language, candidates)
         except ProviderError as exc:
             # Raised before any provider ran — there is no run to report.
             return {"summary": str(exc), "results": []}
@@ -305,7 +301,7 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
             # Keyed on the SEARCH results, not on `results`: when the search did
             # find urls and only the reads failed, the entries are there and speak
             # for themselves.
-            body = format_search_results(outcome.search, query=query, page=page)
+            body = format_search_results(outcome.search, query=query)
             summary = f"{body}\n\n{summary}"
         return {"summary": summary, "results": results}
 

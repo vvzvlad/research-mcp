@@ -107,7 +107,7 @@ async def test_parses_documents_with_passages_as_snippet(make_config):
     respx.get(YANDEX_ENDPOINT).mock(return_value=_xml_response(XMLRIVER_PAYLOAD))
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 10, 1, None)
+        results = await provider.search(client, "q", 10, None)
     assert [(r.title, r.url, r.snippet, r.source) for r in results] == [
         ("Первый результат", "https://xmlriver.test/1", "сниппет один", "xmlriver"),
         ("Второй результат", "https://xmlriver.test/2", "сниппет два", "xmlriver"),
@@ -129,7 +129,7 @@ async def test_falls_back_to_the_snippet_tag_of_the_vendor_sample(make_config):
     )
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 10, 1, None)
+        results = await provider.search(client, "q", 10, None)
     assert [r.snippet for r in results] == ["старый формат"]
 
 
@@ -149,7 +149,7 @@ async def test_inline_markup_inside_title_and_passage_is_flattened(make_config):
     )
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 10, 1, None)
+        results = await provider.search(client, "q", 10, None)
     assert [(r.title, r.snippet) for r in results] == [
         ("Купить слона недорого", "Большой слон в наличии")
     ]
@@ -160,7 +160,7 @@ async def test_grouping_without_documents_is_a_normal_empty_answer(make_config):
     respx.get(YANDEX_ENDPOINT).mock(return_value=_xml_response(EMPTY_PAYLOAD))
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        assert await provider.search(client, "q", 10, 1, None) == []
+        assert await provider.search(client, "q", 10, None) == []
 
 
 @respx.mock
@@ -176,7 +176,7 @@ async def test_documents_without_url_are_skipped(make_config):
     )
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 10, 1, None)
+        results = await provider.search(client, "q", 10, None)
     assert [r.url for r in results] == ["https://xmlriver.test/ok"]
 
 
@@ -190,7 +190,7 @@ async def test_credentials_travel_as_query_parameters(make_config):
     route = respx.get(YANDEX_ENDPOINT).mock(return_value=_xml_response(XMLRIVER_PAYLOAD))
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "купить слона", 10, 1, None)
+        await provider.search(client, "купить слона", 10, None)
     request = route.calls.last.request
     assert request.method == "GET"
     assert str(request.url).startswith(YANDEX_ENDPOINT + "?")
@@ -210,30 +210,22 @@ async def test_ampersand_in_the_query_is_percent_encoded(make_config):
     route = respx.get(YANDEX_ENDPOINT).mock(return_value=_xml_response(XMLRIVER_PAYLOAD))
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "rock & roll", 10, 1, None)
+        await provider.search(client, "rock & roll", 10, None)
     request = route.calls.last.request
     assert "%26" in str(request.url)
     assert request.url.params["query"] == "rock & roll"
 
 
 @respx.mock
-@pytest.mark.parametrize(("page", "expected"), [(1, "0"), (3, "2"), (0, "0"), (-4, "0")])
-async def test_yandex_pages_are_numbered_from_zero(make_config, page, expected):
-    route = respx.get(YANDEX_ENDPOINT).mock(return_value=_xml_response(XMLRIVER_PAYLOAD))
-    provider = XmlRiverSearch(_config(make_config))
+@pytest.mark.parametrize(
+    ("engine", "endpoint", "expected"),
+    [("yandex", YANDEX_ENDPOINT, "0"), ("google", GOOGLE_ENDPOINT, "1")],
+)
+async def test_first_page_is_sent_in_the_engines_numbering(make_config, engine, endpoint, expected):
+    route = respx.get(endpoint).mock(return_value=_xml_response(XMLRIVER_PAYLOAD))
+    provider = XmlRiverSearch(_config(make_config, options={"engine": engine}))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 10, page, None)
-    assert route.calls.last.request.url.params["page"] == expected
-
-
-@respx.mock
-@pytest.mark.parametrize(("page", "expected"), [(1, "1"), (3, "3"), (0, "1")])
-async def test_google_pages_are_numbered_from_one(make_config, page, expected):
-    # Same provider, other engine: the docs state Google's first page is 1.
-    route = respx.get(GOOGLE_ENDPOINT).mock(return_value=_xml_response(XMLRIVER_PAYLOAD))
-    provider = XmlRiverSearch(_config(make_config, options={"engine": "google"}))
-    async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 10, page, None)
+        await provider.search(client, "q", 10, None)
     assert route.calls.last.request.url.params["page"] == expected
 
 
@@ -244,7 +236,7 @@ async def test_yandex_is_the_default_engine(make_config):
     route = respx.get(YANDEX_ENDPOINT).mock(return_value=_xml_response(XMLRIVER_PAYLOAD))
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 10, 1, None)
+        await provider.search(client, "q", 10, None)
     assert route.call_count == 1
 
 
@@ -256,7 +248,7 @@ async def test_language_is_reduced_to_a_yandex_language_code(make_config, langua
     route = respx.get(YANDEX_ENDPOINT).mock(return_value=_xml_response(XMLRIVER_PAYLOAD))
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 10, 1, language)
+        await provider.search(client, "q", 10, language)
     assert route.calls.last.request.url.params["lang"] == expected
 
 
@@ -266,7 +258,7 @@ async def test_language_that_is_not_a_two_letter_code_is_omitted(make_config, la
     route = respx.get(YANDEX_ENDPOINT).mock(return_value=_xml_response(XMLRIVER_PAYLOAD))
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 10, 1, language)
+        await provider.search(client, "q", 10, language)
     assert "lang" not in route.calls.last.request.url.params
 
 
@@ -277,7 +269,7 @@ async def test_google_gets_no_language_parameter(make_config):
     route = respx.get(GOOGLE_ENDPOINT).mock(return_value=_xml_response(XMLRIVER_PAYLOAD))
     provider = XmlRiverSearch(_config(make_config, options={"engine": "google"}))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 10, 1, "ru")
+        await provider.search(client, "q", 10, "ru")
     params = route.calls.last.request.url.params
     assert "lang" not in params
     assert "lr" not in params
@@ -299,7 +291,7 @@ async def test_error_in_the_body_of_a_200_is_a_provider_error(make_config):
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 10, 1, None)
+            await provider.search(client, "q", 10, None)
     message = str(excinfo.value)
     assert "42" in message
     assert "неверный ключ" in message
@@ -319,7 +311,7 @@ async def test_no_results_error_code_is_an_empty_answer(make_config):
     )
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
-        assert await provider.search(client, "q", 10, 1, None) == []
+        assert await provider.search(client, "q", 10, None) == []
 
 
 # -- transport failures ----------------------------------------------------
@@ -331,7 +323,7 @@ async def test_payment_required_is_a_provider_error(make_config):
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 10, 1, None)
+            await provider.search(client, "q", 10, None)
     assert "out of credits" in str(excinfo.value)
     assert route.call_count == 1  # 402 is not retried
 
@@ -344,7 +336,7 @@ async def test_malformed_body_is_a_provider_error(make_config):
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 10, 1, None)
+            await provider.search(client, "q", 10, None)
     assert "invalid XML" in str(excinfo.value)
 
 
@@ -356,7 +348,7 @@ async def test_envelope_without_a_response_element_is_a_provider_error(make_conf
     provider = XmlRiverSearch(_config(make_config))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 10, 1, None)
+            await provider.search(client, "q", 10, None)
     assert "unexpected XML" in str(excinfo.value)
 
 
@@ -370,7 +362,7 @@ async def test_server_error_is_retried_per_config(make_config):
     assert config.retries == 1
     provider = XmlRiverSearch(config)
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 10, 1, None)
+        results = await provider.search(client, "q", 10, None)
     assert len(results) == 2
     assert route.call_count == 2
 

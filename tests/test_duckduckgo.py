@@ -36,7 +36,6 @@ from src.providers import duckduckgo as duckduckgo_module
 from src.providers.base import ProviderError
 from src.providers.duckduckgo import (
     DDG_ENDPOINT,
-    DDG_PAGE_SIZE,
     _MIN_INTERVAL_SECONDS,
     DuckDuckGoSearch,
 )
@@ -147,7 +146,7 @@ def _sent(route) -> dict[str, list[str]]:
 async def test_parses_title_url_and_snippet(make_config, clock):
     _serp()
     async with httpx.AsyncClient() as client:
-        results = await _provider(make_config).search(client, "asyncio", 5, 1, None)
+        results = await _provider(make_config).search(client, "asyncio", 5, None)
     assert [(r.title, r.url, r.snippet, r.source) for r in results] == [
         (
             "asyncio — Asynchronous I/O",
@@ -170,7 +169,7 @@ async def test_the_more_results_row_is_not_a_hit(make_config, clock):
     # token with real hits; it has no `a.result__a`, which is how it is dropped.
     _serp()
     async with httpx.AsyncClient() as client:
-        results = await _provider(make_config).search(client, "q", 5, 1, None)
+        results = await _provider(make_config).search(client, "q", 5, None)
     assert len(results) == 2
     assert all("More results" not in r.title for r in results)
 
@@ -182,7 +181,7 @@ async def test_unwraps_the_uddg_redirector(make_config, clock):
     # target must come back out, with the target's own escapes left alone.
     _serp()
     async with httpx.AsyncClient() as client:
-        results = await _provider(make_config).search(client, "q", 5, 1, None)
+        results = await _provider(make_config).search(client, "q", 5, None)
     assert [r.url for r in results] == [
         "https://docs.python.org/3/library/asyncio.html",
         "https://en.wikipedia.org/wiki/Python_%28programming_language%29",
@@ -201,7 +200,7 @@ async def test_target_escapes_survive_the_unwrapping(make_config, clock):
         'p%3Da%2526b&amp;rut=9f">Tricky</a></div></body></html>'
     )
     async with httpx.AsyncClient() as client:
-        results = await _provider(make_config).search(client, "q", 5, 1, None)
+        results = await _provider(make_config).search(client, "q", 5, None)
     assert [r.url for r in results] == ["https://ex.test/s?id=x%23frag&p=a%26b"]
 
 
@@ -221,7 +220,7 @@ async def test_ad_rows_are_not_returned_as_results(make_config, clock):
         "</body></html>"
     )
     async with httpx.AsyncClient() as client:
-        results = await _provider(make_config).search(client, "q", 5, 1, None)
+        results = await _provider(make_config).search(client, "q", 5, None)
     assert [r.url for r in results] == ["https://organic.test/page"]
 
 
@@ -239,7 +238,7 @@ async def test_unreadable_hrefs_raise_instead_of_looking_empty(make_config, cloc
     )
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError, match="unrecognised href"):
-            await _provider(make_config).search(client, "q", 5, 1, None)
+            await _provider(make_config).search(client, "q", 5, None)
 
 
 @respx.mock
@@ -256,7 +255,7 @@ async def test_one_unreadable_href_does_not_discard_the_readable_ones(make_confi
         "</div></body></html>"
     )
     async with httpx.AsyncClient() as client:
-        results = await _provider(make_config).search(client, "q", 5, 1, None)
+        results = await _provider(make_config).search(client, "q", 5, None)
     assert [r.url for r in results] == ["https://ok.test/a"]
 
 
@@ -269,7 +268,7 @@ async def test_a_page_of_ads_only_is_empty_not_blocked(make_config, clock):
         'href="//duckduckgo.com/y.js?ad_domain=shop.test">Ad</a></div></body></html>'
     )
     async with httpx.AsyncClient() as client:
-        assert await _provider(make_config).search(client, "q", 5, 1, None) == []
+        assert await _provider(make_config).search(client, "q", 5, None) == []
 
 
 @respx.mock
@@ -282,7 +281,7 @@ async def test_href_without_uddg_is_used_as_is(make_config, clock):
         '<a class="result__snippet">snippet</a></div></body></html>'
     )
     async with httpx.AsyncClient() as client:
-        results = await _provider(make_config).search(client, "q", 5, 1, None)
+        results = await _provider(make_config).search(client, "q", 5, None)
     assert [(r.url, r.snippet) for r in results] == [("https://plain.test/page", "snippet")]
 
 
@@ -293,7 +292,7 @@ async def test_row_without_a_snippet_yields_an_empty_snippet(make_config, clock)
         'href="https://plain.test/page">Plain</a></div></body></html>'
     )
     async with httpx.AsyncClient() as client:
-        results = await _provider(make_config).search(client, "q", 5, 1, None)
+        results = await _provider(make_config).search(client, "q", 5, None)
     assert [(r.url, r.snippet) for r in results] == [("https://plain.test/page", "")]
 
 
@@ -305,7 +304,7 @@ async def test_no_results_page_returns_an_empty_list(make_config, clock):
     # The ONE case where [] is the honest answer: DuckDuckGo says so itself.
     _serp(NO_RESULTS_HTML)
     async with httpx.AsyncClient() as client:
-        assert await _provider(make_config).search(client, "q", 5, 1, None) == []
+        assert await _provider(make_config).search(client, "q", 5, None) == []
 
 
 @respx.mock
@@ -315,7 +314,7 @@ async def test_blocked_page_raises_instead_of_returning_empty(make_config, clock
     _serp(BLOCKED_HTML)
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await _provider(make_config).search(client, "q", 5, 1, None)
+            await _provider(make_config).search(client, "q", 5, None)
     assert "duckduckgo" in str(excinfo.value)
     assert "markup" in str(excinfo.value)
 
@@ -326,7 +325,7 @@ async def test_unknown_markup_raises(make_config, clock):
     _serp("<html><body><div class='hit'><a href='https://x.test'>X</a></div></body></html>")
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError):
-            await _provider(make_config).search(client, "q", 5, 1, None)
+            await _provider(make_config).search(client, "q", 5, None)
 
 
 @respx.mock
@@ -335,7 +334,7 @@ async def test_empty_body_raises(make_config, clock):
     _serp("")
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await _provider(make_config).search(client, "q", 5, 1, None)
+            await _provider(make_config).search(client, "q", 5, None)
     assert "unparseable" in str(excinfo.value)
 
 
@@ -347,7 +346,7 @@ async def test_http_202_is_a_rate_limit_block_not_a_success(make_config, clock):
     _serp("Ratelimit", status=202)
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await _provider(make_config).search(client, "q", 5, 1, None)
+            await _provider(make_config).search(client, "q", 5, None)
     assert "rate limited (HTTP 202)" in str(excinfo.value)
 
 
@@ -358,21 +357,20 @@ async def test_http_403_is_a_provider_error(make_config, clock):
     _serp(BLOCKED_HTML, status=403)
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError):
-            await _provider(make_config).search(client, "q", 5, 1, None)
+            await _provider(make_config).search(client, "q", 5, None)
 
 
-# -- request body: q / kl / s ----------------------------------------------
+# -- request body: q / kl -------------------------------------------------
 
 
 @respx.mock
 async def test_query_is_form_encoded_and_default_region_is_wt_wt(make_config, clock):
     route = _serp()
     async with httpx.AsyncClient() as client:
-        await _provider(make_config).search(client, "погода в москве", 5, 1, None)
+        await _provider(make_config).search(client, "погода в москве", 5, None)
     sent = _sent(route)
     assert sent["q"] == ["погода в москве"]
     assert sent["kl"] == ["wt-wt"]  # no language → no regional bias
-    assert "s" not in sent  # page 1 omits the offset entirely
 
 
 @pytest.mark.parametrize(
@@ -399,29 +397,8 @@ async def test_query_is_form_encoded_and_default_region_is_wt_wt(make_config, cl
 async def test_language_maps_to_a_kl_region(make_config, clock, language, expected):
     route = _serp()
     async with httpx.AsyncClient() as client:
-        await _provider(make_config).search(client, "q", 5, 1, language)
+        await _provider(make_config).search(client, "q", 5, language)
     assert _sent(route)["kl"] == [expected]
-
-
-@pytest.mark.parametrize(("page", "offset"), [(2, 30), (3, 60), (5, 120)])
-@respx.mock
-async def test_deeper_pages_send_the_result_offset(make_config, clock, page, offset):
-    # The endpoint's own next-page form posts `s` as a RESULT offset.
-    route = _serp()
-    async with httpx.AsyncClient() as client:
-        await _provider(make_config).search(client, "q", 5, page, None)
-    assert _sent(route)["s"] == [str(offset)]
-    assert offset == (page - 1) * DDG_PAGE_SIZE
-
-
-@pytest.mark.parametrize("page", [0, -1, 1])
-@respx.mock
-async def test_page_one_or_below_sends_no_offset(make_config, clock, page):
-    # Nothing upstream clamps `page`; a negative offset would be a bad request.
-    route = _serp()
-    async with httpx.AsyncClient() as client:
-        await _provider(make_config).search(client, "q", 5, page, None)
-    assert "s" not in _sent(route)
 
 
 @respx.mock
@@ -429,7 +406,7 @@ async def test_browser_user_agent_is_sent(make_config, clock):
     # Without it the endpoint serves the block page instead of a SERP.
     route = _serp()
     async with httpx.AsyncClient() as client:
-        await _provider(make_config).search(client, "q", 5, 1, None)
+        await _provider(make_config).search(client, "q", 5, None)
     assert "Mozilla/5.0" in route.calls.last.request.headers["User-Agent"]
 
 
@@ -444,7 +421,7 @@ async def test_first_call_passes(make_config, clock):
     assert clock.now < _MIN_INTERVAL_SECONDS
     _serp()
     async with httpx.AsyncClient() as client:
-        results = await _provider(make_config).search(client, "q", 5, 1, None)
+        results = await _provider(make_config).search(client, "q", 5, None)
     assert len(results) == 2
 
 
@@ -453,10 +430,10 @@ async def test_second_call_within_interval_is_throttled(make_config, clock):
     route = _serp()
     provider = _provider(make_config)
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, None)
+        await provider.search(client, "q", 5, None)
         clock.advance(_MIN_INTERVAL_SECONDS - 1)  # still inside the window
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "throttled" in str(excinfo.value)
     assert route.call_count == 1  # the skipped query never hit the network
 
@@ -466,9 +443,9 @@ async def test_call_passes_again_after_the_interval(make_config, clock):
     route = _serp()
     provider = _provider(make_config)
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, None)
+        await provider.search(client, "q", 5, None)
         clock.advance(_MIN_INTERVAL_SECONDS + 1)
-        await provider.search(client, "q", 5, 1, None)
+        await provider.search(client, "q", 5, None)
     assert route.call_count == 2
 
 
@@ -479,9 +456,9 @@ async def test_call_passes_exactly_at_the_interval(make_config, clock):
     route = _serp()
     provider = _provider(make_config)
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, None)
+        await provider.search(client, "q", 5, None)
         clock.advance(_MIN_INTERVAL_SECONDS)
-        await provider.search(client, "q", 5, 1, None)
+        await provider.search(client, "q", 5, None)
     assert route.call_count == 2
 
 
@@ -495,8 +472,8 @@ async def test_concurrent_calls_let_exactly_one_through(make_config, clock):
     provider = _provider(make_config)
     async with httpx.AsyncClient() as client:
         outcomes = await asyncio.gather(
-            provider.search(client, "q", 5, 1, None),
-            provider.search(client, "q", 5, 1, None),
+            provider.search(client, "q", 5, None),
+            provider.search(client, "q", 5, None),
             return_exceptions=True,
         )
     passed = [o for o in outcomes if isinstance(o, list)]
@@ -516,12 +493,12 @@ async def test_throttle_skips_instead_of_sleeping(make_config, clock):
     route = _serp()
     provider = _provider(make_config)
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, None)
+        await provider.search(client, "q", 5, None)
         # A real sleep would need _MIN_INTERVAL_SECONDS of wall time; this whole
         # call has to finish inside a fraction of that.
         async with asyncio.timeout(1.0):
             with pytest.raises(ProviderError):
-                await provider.search(client, "q", 5, 1, None)
+                await provider.search(client, "q", 5, None)
     assert route.call_count == 1
 
 
@@ -535,7 +512,7 @@ async def test_retry_is_disabled_so_one_slot_is_one_upstream_query(make_config, 
     assert config.retries == 1
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError):
-            await DuckDuckGoSearch(config).search(client, "q", 5, 1, None)
+            await DuckDuckGoSearch(config).search(client, "q", 5, None)
     assert route.call_count == 1  # one attempt, no retry
 
 
@@ -547,11 +524,11 @@ async def test_failed_query_still_spends_the_slot(make_config, clock):
     provider = _provider(make_config)
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as first:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
         assert "throttled" not in str(first.value)  # it really was the HTTP failure
         clock.advance(_MIN_INTERVAL_SECONDS - 1)
         with pytest.raises(ProviderError) as second:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "throttled" in str(second.value)
     assert route.call_count == 1
 
@@ -569,7 +546,7 @@ async def test_search_works_with_no_env_at_all(monkeypatch, settings, capture_lo
     pipe = Pipeline.build(settings)
     try:
         assert pipe.search_names == ["duckduckgo"]
-        results = (await pipe.search("asyncio", num_results=10, page=1, language=None)).results
+        results = (await pipe.search("asyncio", num_results=10, language=None)).results
     finally:
         await pipe.aclose()
 

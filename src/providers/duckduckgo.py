@@ -1,9 +1,9 @@
 """DuckDuckGo search provider — keyless, and the only one that needs no config.
 
 API: POST ``https://html.duckduckgo.com/html/`` with a form-encoded body
-``{"q": <query>, "kl": <region>}`` (plus ``s`` for deeper pages) and a browser
-User-Agent. This is the no-JS SERP: unlike duckduckgo.com itself it needs no
-``vqd`` token handshake, so ONE request returns the whole result page as HTML.
+``{"q": <query>, "kl": <region>}`` and a browser User-Agent. This is the no-JS
+SERP: unlike duckduckgo.com itself it needs no ``vqd`` token handshake, so ONE
+request returns the whole result page as HTML.
 
 Response shape: each hit is a ``.result`` row whose ``a.result__a`` carries the
 title text and the href, and whose ``.result__snippet`` carries the snippet. The
@@ -37,10 +37,6 @@ from src.providers.base import (
 from src.providers.registry import register
 
 DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
-
-# Results per SERP page. The endpoint's own "next page" form posts `s` as a
-# RESULT offset (not a page index), and one no-JS page carries 30 results.
-DDG_PAGE_SIZE = 30
 
 # `kl` value meaning "no region at all" — the default, and the fallback for a
 # language tag we cannot map.
@@ -146,7 +142,6 @@ class DuckDuckGoSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
         # Local throttle, SKIP semantics (same design as searxng and brave): if
@@ -185,10 +180,6 @@ class DuckDuckGoSearch:
             "q": query,
             "kl": _ddg_region(language) if language else DDG_REGION_ANY,
         }
-        # Page 1 omits `s` entirely, exactly like the endpoint's own first
-        # request; `page > 1` also covers page <= 0 (nothing upstream clamps it).
-        if page > 1:
-            data["s"] = str((page - 1) * DDG_PAGE_SIZE)
         response = await request_with_retry(
             client,
             "POST",

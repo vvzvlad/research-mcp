@@ -56,21 +56,8 @@ class FirecrawlSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
-        # Firecrawl's search body has no paging parameter — no `offset`, `page`
-        # or `start` — so page 2 would come back as page 1 verbatim. Refuse
-        # rather than silently serving the first page again: that would spend
-        # two more of the 1000 monthly credits on links we already have, and
-        # pages 2, 3, ... would each re-inject those same hits into the merge
-        # (dedup runs within a single search() call, never across calls). Same
-        # reasoning as brave's refusal past its deepest servable page.
-        if page > 1:
-            raise ProviderError(
-                f"{self.name}: page {page} is beyond firecrawl's depth (no paging)"
-            )
-
         body: dict[str, Any] = {
             "query": query,
             # `limit` is charged in blocks of 10 rounded up, so never ask for

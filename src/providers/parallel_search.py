@@ -29,9 +29,8 @@ returns compressed page extracts, sometimes ending in "... (content
 truncated)"), so they are joined into a single snippet below. An empty
 ``results`` list is a normal empty answer, not a failure.
 
-No pagination and no language parameter exist in the schema (checked 2026-09-18):
-there is no page/offset/cursor anywhere, and ``advanced_settings.location`` is a
-country code, not a language tag.
+No language parameter exists in the schema (checked 2026-09-18):
+``advanced_settings.location`` is a country code, not a language tag.
 """
 
 from __future__ import annotations
@@ -82,19 +81,8 @@ class ParallelSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
-        # Parallel has no pagination at all, so page 2+ can only be served by
-        # re-running the same search and handing back the same hits — a paid
-        # request for results the caller already has (dedup runs inside one
-        # search() call, never across calls). Refuse instead, exactly like brave
-        # does past its depth limit.
-        if page > 1:
-            raise ProviderError(
-                f"{self.name}: page {page} is unavailable (parallel search has no pagination)"
-            )
-
         body: dict[str, Any] = {
             # One caller query → one search query. `objective` is deliberately
             # NOT sent: the facade receives a keyword query, not a separate

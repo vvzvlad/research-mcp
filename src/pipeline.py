@@ -506,7 +506,6 @@ class Pipeline:
         self,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> SearchOutcome:
         """Run all search instances concurrently, merge + dedup, trim.
@@ -526,7 +525,7 @@ class Pipeline:
             # Each provider uses the client bound to ITS proxy (None = direct).
             client = self._clients.client_for(provider.proxy)
             try:
-                hits = await provider.search(client, query, num_results, page, language)
+                hits = await provider.search(client, query, num_results, language)
                 return provider.name, hits, ""
             except ProviderError as exc:
                 logger.info("search '{}' failed: {}", provider.name, exc)
@@ -932,7 +931,6 @@ class Pipeline:
         self,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
         candidates: int,
     ) -> SearchReadOutcome:
@@ -955,7 +953,7 @@ class Pipeline:
         # A caller that asked for fewer candidates than pages would cap the
         # answer below what it requested; the over-fetch is never negative.
         candidates = max(num_results, candidates)
-        outcome = await self.search(query, candidates, page, language)
+        outcome = await self.search(query, candidates, language)
         hits = outcome.results
 
         semaphore = asyncio.Semaphore(self._settings.read_pages_concurrency)

@@ -4,8 +4,7 @@ API (verified against the official docs 2026-09-18,
 https://you.com/docs/api-reference/search — the same page as clean Markdown at
 https://you.com/docs/api-reference/search.md): POST
 ``https://ydc-index.io/v1/search``, ``Content-Type: application/json``, header
-``X-API-Key``; JSON body ``{"query", "count", "offset", "country", "language",
-...}`` → ``{"results": {"web": [...], "news": [...]}, "metadata": {...}}``.
+``X-API-Key``; JSON body ``{"query", "count", "country", "language", ...}`` → ``{"results": {"web": [...], "news": [...]}, "metadata": {...}}``.
 Every ``results.web[]`` item carries ``url`` / ``title`` / ``description`` /
 ``snippets`` (plus thumbnail_url, page_age, contents, ...).
 
@@ -16,10 +15,6 @@ fragments ... built for skimming"; it is used only when ``description`` comes
 back empty. ``results`` and each section inside it are marked optional in the
 schema, so a response without ``web`` is a normal empty answer, not a failure.
 ``news`` is ignored: this is the web-search half of the pipeline.
-
-Paging: ``offset`` is a 0-based PAGE index — "The ``offset`` is calculated in
-multiples of ``count``" — with the documented range ``0 <= offset <= 9``. Same
-shape as brave's ``offset``, so page 10 is the deepest page served.
 
 ``count`` ("the maximum number of search results to return per section") has no
 numeric bound in the API reference; the pricing section of
@@ -46,12 +41,6 @@ YOUCOM_ENDPOINT = "https://ydc-index.io/v1/search"
 # Most results one call can return, from the pricing line quoted above ("up to
 # 100 results per call"). The parameter reference states no bound of its own.
 YOUCOM_COUNT_MAX = 100
-
-# Deepest value `offset` accepts: the reference says "Range 0 <= offset <= 9",
-# i.e. page 10 is the last page of a given result set. The tool's `page`
-# argument has no upper bound of its own, so this provider refuses deeper pages
-# itself — see `search` for why it refuses rather than clamping.
-YOUCOM_OFFSET_MAX = 9
 
 # Every value the `language` enum accepts, verbatim from the parameter reference
 # (read 2026-09-18). BCP 47 in the vendor's own uppercase spelling — note it is
@@ -108,26 +97,11 @@ class YouComSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
-        # Deeper than You.com can serve → refuse, do not clamp to the last page.
-        # Clamping would spend a paid call just to hand back page 10 again, and
-        # pages 11, 12, ... would each re-inject those same hits into the merge
-        # (dedup runs within a single search() call, never across calls).
-        if page > YOUCOM_OFFSET_MAX + 1:
-            raise ProviderError(
-                f"{self.name}: page {page} is beyond you.com's depth "
-                f"(max {YOUCOM_OFFSET_MAX + 1})"
-            )
-
         body: dict[str, Any] = {
             "query": query,
             "count": max(1, min(num_results, YOUCOM_COUNT_MAX)),
-            # `offset` is a 0-based PAGE index, not a result offset. max(0, ...)
-            # covers page <= 0: nothing upstream clamps `page` (src/server.py
-            # clamps only num_results), and a negative offset is out of range.
-            "offset": max(0, page - 1),
         }
         if language:
             # Unlike serper's Google-compatible `hl`, which takes a regional tag

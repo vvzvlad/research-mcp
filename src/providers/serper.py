@@ -1,7 +1,7 @@
 """Serper.dev Google Search API provider.
 
 API (verified 2026-06): POST ``https://google.serper.dev/search`` with header
-``X-API-KEY`` and JSON body ``{"q", "num", "page"}`` →
+``X-API-KEY`` and JSON body ``{"q", "num"}`` →
 ``{"organic": [{"title", "link", "snippet"}], ...}``.
 """
 
@@ -32,10 +32,9 @@ class SerperSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
-        body: dict[str, object] = {"q": query, "num": num_results, "page": page}
+        body: dict[str, object] = {"q": query, "num": num_results}
         if language:
             body["hl"] = language
         response = await request_with_retry(

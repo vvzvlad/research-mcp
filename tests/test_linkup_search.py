@@ -1,4 +1,4 @@
-"""Linkup search provider: response parsing, request body, paging, failures.
+"""Linkup search provider: response parsing, request body, failures.
 
 The payload mirrors the ``SearchResultsOutput`` shape documented on 2026-09-18
 at https://docs.linkup.so/pages/documentation/api-reference/endpoint/post-search
@@ -60,7 +60,7 @@ async def test_parses_name_as_title_and_content_as_snippet(make_config):
     )
     provider = LinkupSearch(make_config("linkup_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [(r.title, r.url, r.snippet, r.source) for r in results] == [
         ("First hit", "https://linkup.test/1", "snippet one", "linkup_search"),
         ("Second hit", "https://linkup.test/2", "snippet two", "linkup_search"),
@@ -74,7 +74,7 @@ async def test_empty_results_list_is_a_normal_empty_answer(make_config):
     )
     provider = LinkupSearch(make_config("linkup_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        assert await provider.search(client, "q", 5, 1, None) == []
+        assert await provider.search(client, "q", 5, None) == []
 
 
 @respx.mock
@@ -82,7 +82,7 @@ async def test_missing_results_key_is_an_empty_result_list(make_config):
     respx.post(LINKUP_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json={}))
     provider = LinkupSearch(make_config("linkup_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        assert await provider.search(client, "q", 5, 1, None) == []
+        assert await provider.search(client, "q", 5, None) == []
 
 
 @respx.mock
@@ -109,7 +109,7 @@ async def test_image_items_and_items_without_url_are_skipped(make_config):
     )
     provider = LinkupSearch(make_config("linkup_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [r.url for r in results] == ["https://linkup.test/ok"]
 
 
@@ -123,7 +123,7 @@ async def test_request_carries_the_bearer_key_and_the_documented_body(make_confi
     )
     provider = LinkupSearch(make_config("linkup_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "what is linkup", 6, 1, None)
+        await provider.search(client, "what is linkup", 6, None)
     request = route.calls.last.request
     assert str(request.url) == LINKUP_SEARCH_ENDPOINT
     assert request.method == "POST"
@@ -155,7 +155,7 @@ async def test_language_is_never_sent(make_config):
     )
     provider = LinkupSearch(make_config("linkup_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, "ru-RU")
+        await provider.search(client, "q", 5, "ru-RU")
     body = _body(route)
     assert "language" not in body
     assert "includeImages" not in body  # default (false) is what we want
@@ -174,36 +174,8 @@ async def test_max_results_is_clamped(make_config, num_results, expected):
     )
     provider = LinkupSearch(make_config("linkup_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", num_results, 1, None)
+        await provider.search(client, "q", num_results, None)
     assert _body(route)["maxResults"] == expected
-
-
-# -- paging ----------------------------------------------------------------
-
-
-@respx.mock
-async def test_second_page_is_refused_without_a_request(make_config):
-    route = respx.post(LINKUP_SEARCH_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=LINKUP_PAYLOAD)
-    )
-    provider = LinkupSearch(make_config("linkup_search", api_key="k"))
-    async with httpx.AsyncClient() as client:
-        with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 3, None)
-    assert "no pagination" in str(excinfo.value)
-    assert route.call_count == 0
-
-
-@respx.mock
-@pytest.mark.parametrize("page", [0, -5, 1])
-async def test_first_or_non_positive_page_is_served(make_config, page):
-    route = respx.post(LINKUP_SEARCH_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=LINKUP_PAYLOAD)
-    )
-    provider = LinkupSearch(make_config("linkup_search", api_key="k"))
-    async with httpx.AsyncClient() as client:
-        assert len(await provider.search(client, "q", 5, page, None)) == 2
-    assert route.call_count == 1
 
 
 # -- failures --------------------------------------------------------------
@@ -217,7 +189,7 @@ async def test_payment_required_is_a_provider_error(make_config):
     provider = LinkupSearch(make_config("linkup_search", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "out of credits" in str(excinfo.value)
     assert route.call_count == 1
 
@@ -230,7 +202,7 @@ async def test_invalid_json_is_a_provider_error(make_config):
     provider = LinkupSearch(make_config("linkup_search", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "invalid JSON" in str(excinfo.value)
 
 

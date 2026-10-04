@@ -37,10 +37,10 @@ a SearXNG that reaches DuckDuckGo over the same address.
 
 | Tool | What it does |
 |------|--------------|
-| `web_search(query, num_results=8, page=1, language=None)` | Search across all enabled providers, merge + dedup → ranked list (title, URL, snippet). Search only. |
+| `web_search(query, num_results=8, language=None)` | Search across all enabled providers, merge + dedup → ranked list (title, URL, snippet). Search only. |
 | `read_page(url)` | One page or PDF → clean Markdown. Auto-detects type, walks the read pipeline (light → heavy) until one succeeds. |
 | `read_pages(urls)` | Up to 20 urls concurrently → `{summary, pages}`, where each page is `{url, ok, markdown}` or `{url, ok, error, reason}`. |
-| `search_and_read(query, num_results=5, page=1, language=None)` | Search **and** read the top hits in one call → `{summary, results}`, each result a hit (`title`, `url`, `snippet`) plus its `markdown` (or `error` + `reason`). Over-fetches candidates and reads them in waves, so failed urls do not eat the quota. |
+| `search_and_read(query, num_results=5, language=None)` | Search **and** read the top hits in one call → `{summary, results}`, each result a hit (`title`, `url`, `snippet`) plus its `markdown` (or `error` + `reason`). Over-fetches candidates and reads them in waves, so failed urls do not eat the quota. |
 
 The tool descriptions cross-reference each other (when to take this one, when to
 take another), so the model gets a routing graph instead of four independent

@@ -1,6 +1,6 @@
 """SearXNG search provider (self-hosted metasearch).
 
-API: GET ``{url}/search?q=&format=json&pageno=&language=`` →
+API: GET ``{url}/search?q=&format=json&language=`` →
 ``{"results": [{"url", "title", "content", ...}], ...}``.
 """
 
@@ -52,7 +52,6 @@ class SearxngSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
         # Local throttle, SKIP semantics: if the slot is taken this instance drops
@@ -85,7 +84,7 @@ class SearxngSearch:
             )
         self._last_call = now
 
-        params: dict[str, Any] = {"q": query, "format": "json", "pageno": page}
+        params: dict[str, Any] = {"q": query, "format": "json"}
         if language:
             params["language"] = language
         response = await request_with_retry(

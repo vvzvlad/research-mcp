@@ -3,7 +3,7 @@
 API (verified live 2026-08-09): GET
 ``https://api.search.brave.com/res/v1/web/search`` with headers ``Accept:
 application/json``, ``Accept-Encoding: gzip`` and ``X-Subscription-Token``;
-query params ``q``, ``count``, ``country``, ``search_lang``, ``offset`` →
+query params ``q``, ``count``, ``country``, ``search_lang`` →
 top-level keys ``["type", "query", "mixed", "web"]``, where ``web`` is
 ``{"type", "results", "family_friendly"}`` and every ``web.results[]`` item
 carries ``title`` / ``url`` / ``description`` (plus meta_url, profile, thumbnail,
@@ -32,12 +32,6 @@ BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 # Brave caps `count` (results per page) at 20.
 BRAVE_COUNT_MAX = 20
-
-# Brave caps `offset` (the 0-based page index) at 9, i.e. page 10 is the deepest
-# page it will serve; anything above that is a 422. The tool's `page` argument
-# has no upper bound of its own, so this provider refuses deeper pages itself —
-# see `search` for why it refuses rather than clamping.
-BRAVE_OFFSET_MAX = 9
 
 # Every value Brave's `search_lang` accepts, verbatim from the `Language` enum
 # of the official Web Search OpenAPI schema (52 codes, read 2026-08-09 from
@@ -132,21 +126,8 @@ class BraveSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
-        # Deeper than Brave can serve → refuse, do not clamp to the last page.
-        # Clamping would spend a throttle slot and one of the 2000 monthly
-        # queries just to hand back page 10 again, and pages 11, 12, ... would
-        # each re-inject those same hits into the merge (dedup runs within a
-        # single search() call, never across calls). This check sits ABOVE the
-        # throttle on purpose: a query we never send must not cost a slot.
-        if page > BRAVE_OFFSET_MAX + 1:
-            raise ProviderError(
-                f"{self.name}: page {page} is beyond brave's depth "
-                f"(max {BRAVE_OFFSET_MAX + 1})"
-            )
-
         # Local throttle, SKIP semantics (same design as searxng, different
         # reason: here it is Brave's own 1 req/s plan limit). If the slot is taken
         # this instance drops out of the current search immediately. It must NEVER
@@ -179,10 +160,6 @@ class BraveSearch:
         params: dict[str, Any] = {
             "q": query,
             "count": max(1, min(num_results, BRAVE_COUNT_MAX)),
-            # Brave's `offset` is a 0-based PAGE index, not a result offset.
-            # max(0, ...) covers page <= 0: nothing upstream clamps `page`
-            # (src/server.py only clamps num_results), and offset=-1 is a 422.
-            "offset": max(0, page - 1),
         }
         if language:
             # Unlike serper's Google-compatible `hl` or searxng's `language`,

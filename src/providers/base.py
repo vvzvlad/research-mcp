@@ -86,7 +86,6 @@ class SearchProvider(Protocol):
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
         """Return search results, or raise ``ProviderError`` on failure."""

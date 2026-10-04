@@ -80,7 +80,7 @@ async def test_search_merges_and_dedups(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)
     try:
-        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
+        results = (await pipe.search("q", num_results=10, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -130,7 +130,7 @@ async def test_searxng_deployment_does_not_degrade_when_duckduckgo_answers(
 
     pipe = Pipeline.build(settings)
     try:
-        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
+        results = (await pipe.search("q", num_results=10, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -181,7 +181,7 @@ async def test_search_dedup_prefers_brave_over_serper(monkeypatch, settings):
 
     pipe = Pipeline.build(settings)
     try:
-        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
+        results = (await pipe.search("q", num_results=10, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -208,7 +208,7 @@ async def test_search_trims_to_num_results(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        results = (await pipe.search("q", num_results=3, page=1, language=None)).results
+        results = (await pipe.search("q", num_results=3, language=None)).results
     finally:
         await pipe.aclose()
     assert len(results) == 3
@@ -227,7 +227,7 @@ async def test_search_clamps_non_positive_num_results(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        results = (await pipe.search("q", num_results=0, page=1, language=None)).results
+        results = (await pipe.search("q", num_results=0, language=None)).results
     finally:
         await pipe.aclose()
     assert len(results) == 1  # clamped up to 1, not empty
@@ -244,7 +244,7 @@ async def test_exa_clamps_num_results(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        await pipe.search("q", num_results=999, page=1, language=None)
+        await pipe.search("q", num_results=999, language=None)
     finally:
         await pipe.aclose()
     sent_body = route.calls.last.request.content
@@ -271,7 +271,7 @@ async def test_search_all_instances_failing_renders_as_a_failure(monkeypatch, se
 
     pipe = Pipeline.build(settings)
     try:
-        outcome = await pipe.search("q", num_results=10, page=1, language=None)
+        outcome = await pipe.search("q", num_results=10, language=None)
     finally:
         await pipe.aclose()
 
@@ -281,13 +281,13 @@ async def test_search_all_instances_failing_renders_as_a_failure(monkeypatch, se
     assert outcome.answered == []
     assert outcome.empty == []
 
-    rendered = format_search_results(outcome, query="q", page=1)
+    rendered = format_search_results(outcome, query="q")
     assert "ничего не найдено" not in rendered.lower()
     assert "сбой поиска" in rendered.lower()
     # ...and it is a different text from the one the same query gets when an
     # instance really answered with nothing.
     answered_nothing = replace(outcome, answered=["searxng"], failed=["serper"])
-    assert rendered != format_search_results(answered_nothing, query="q", page=1)
+    assert rendered != format_search_results(answered_nothing, query="q")
 
 
 @respx.mock
@@ -308,7 +308,7 @@ async def test_search_empty_instance_answers_render_as_nothing_found(monkeypatch
 
     pipe = Pipeline.build(settings)
     try:
-        outcome = await pipe.search("q", num_results=10, page=1, language=None)
+        outcome = await pipe.search("q", num_results=10, language=None)
     finally:
         await pipe.aclose()
 
@@ -317,7 +317,7 @@ async def test_search_empty_instance_answers_render_as_nothing_found(monkeypatch
     assert outcome.answered == []
     assert outcome.failed == []
 
-    rendered = format_search_results(outcome, query="ничего такого", page=2)
+    rendered = format_search_results(outcome, query="ничего такого")
     assert "ничего не найдено" in rendered.lower()
     assert "ничего такого" in rendered
 
@@ -340,7 +340,7 @@ async def test_empty_instance_answer_is_not_billed(monkeypatch, settings, captur
 
     pipe = Pipeline.build(settings)
     try:
-        await pipe.search("q", num_results=10, page=1, language=None)
+        await pipe.search("q", num_results=10, language=None)
     finally:
         await pipe.aclose()
 
@@ -374,7 +374,7 @@ async def test_search_log_reports_empty_and_failed_instances(monkeypatch, settin
 
     pipe = Pipeline.build(settings)
     try:
-        outcome = await pipe.search("q", num_results=10, page=1, language=None)
+        outcome = await pipe.search("q", num_results=10, language=None)
     finally:
         await pipe.aclose()
 
@@ -441,7 +441,7 @@ async def test_search_rerank_reorders_and_is_accounted(monkeypatch, settings, ca
 
     pipe = Pipeline.build(settings)
     try:
-        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
+        results = (await pipe.search("q", num_results=10, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -476,7 +476,7 @@ async def test_search_rerank_failure_falls_back_to_merge_order(
     pipe = Pipeline.build(settings)
     try:
         # Must NOT raise: a broken reranker degrades to the original order.
-        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
+        results = (await pipe.search("q", num_results=10, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -511,7 +511,7 @@ async def test_search_rerank_empty_ranking_falls_back_to_merge_order(
     pipe = Pipeline.build(settings)
     try:
         # Must NOT raise: the anomaly degrades to the original order.
-        results = (await pipe.search("q", num_results=10, page=1, language=None)).results
+        results = (await pipe.search("q", num_results=10, language=None)).results
     finally:
         await pipe.aclose()
 
@@ -1007,7 +1007,7 @@ async def test_transient_retry_then_success(monkeypatch, settings):
     ]
     pipe = Pipeline.build(settings)
     try:
-        results = (await pipe.search("q", num_results=5, page=1, language=None)).results
+        results = (await pipe.search("q", num_results=5, language=None)).results
     finally:
         await pipe.aclose()
     assert any(r.url == "https://ok.test" for r in results)
@@ -1029,7 +1029,7 @@ async def test_search_emits_per_request_log(monkeypatch, settings, capture_logs)
     )
     pipe = Pipeline.build(settings)
     try:
-        await pipe.search("hello world", num_results=5, page=1, language=None)
+        await pipe.search("hello world", num_results=5, language=None)
     finally:
         await pipe.aclose()
     line = next((m for m in capture_logs if m.startswith("search query=")), None)
@@ -1077,7 +1077,7 @@ async def test_search_log_counts_paid_calls(monkeypatch, settings, capture_logs)
     )
     pipe = Pipeline.build(settings)
     try:
-        await pipe.search("q", num_results=10, page=1, language=None)
+        await pipe.search("q", num_results=10, language=None)
     finally:
         await pipe.aclose()
     line = next((m for m in capture_logs if m.startswith("search query=")), None)
@@ -1177,7 +1177,7 @@ async def test_proxied_provider_still_serves(monkeypatch, settings):
     )
     pipe = Pipeline.build(settings)
     try:
-        results = (await pipe.search("q", num_results=5, page=1, language=None)).results
+        results = (await pipe.search("q", num_results=5, language=None)).results
         assert any(r.url == "https://e.test" for r in results)
         # The proxied exa client is distinct from the direct client.
         proxied = pipe._clients.client_for("socks5://proxy.invalid:1080")
@@ -1232,7 +1232,7 @@ async def test_search_and_read_tops_up_after_failed_reads(monkeypatch, settings)
     pipe = Pipeline.build(settings)
     try:
         outcome = await pipe.search_and_read(
-            "q", num_results=3, page=1, language=None, candidates=8
+            "q", num_results=3, language=None, candidates=8
         )
     finally:
         await pipe.aclose()
@@ -1265,7 +1265,7 @@ async def test_search_and_read_fills_the_remainder_with_failures(monkeypatch, se
     pipe = Pipeline.build(settings)
     try:
         outcome = await pipe.search_and_read(
-            "q", num_results=3, page=1, language=None, candidates=4
+            "q", num_results=3, language=None, candidates=4
         )
     finally:
         await pipe.aclose()
@@ -1294,7 +1294,7 @@ async def test_search_and_read_reads_no_more_urls_than_needed(monkeypatch, setti
     pipe = Pipeline.build(settings)
     try:
         outcome = await pipe.search_and_read(
-            "q", num_results=2, page=1, language=None, candidates=10
+            "q", num_results=2, language=None, candidates=10
         )
     finally:
         await pipe.aclose()
@@ -1316,7 +1316,7 @@ async def test_search_and_read_emits_a_summary_log(monkeypatch, settings, captur
 
     pipe = Pipeline.build(settings)
     try:
-        await pipe.search_and_read("q", num_results=2, page=1, language=None, candidates=4)
+        await pipe.search_and_read("q", num_results=2, language=None, candidates=4)
     finally:
         await pipe.aclose()
 

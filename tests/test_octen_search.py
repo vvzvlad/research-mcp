@@ -70,7 +70,7 @@ async def test_parses_results_with_highlight_as_snippet(make_config):
     )
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [(r.title, r.url, r.snippet, r.source) for r in results] == [
         ("First hit", "https://octen.test/1", "snippet one", "octen_search"),
         ("Second hit", "https://octen.test/2", "snippet two", "octen_search"),
@@ -86,7 +86,7 @@ async def test_empty_results_list_is_a_normal_empty_answer(make_config):
     )
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        assert await provider.search(client, "q", 5, 1, None) == []
+        assert await provider.search(client, "q", 5, None) == []
 
 
 @respx.mock
@@ -101,7 +101,7 @@ async def test_missing_data_or_results_is_an_empty_result_list(make_config, payl
     respx.post(OCTEN_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        assert await provider.search(client, "q", 5, 1, None) == []
+        assert await provider.search(client, "q", 5, None) == []
 
 
 @respx.mock
@@ -122,7 +122,7 @@ async def test_items_without_url_are_skipped(make_config):
     )
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [r.url for r in results] == ["https://octen.test/ok"]
 
 
@@ -136,7 +136,7 @@ async def test_request_carries_the_api_key_header_and_the_documented_body(make_c
     )
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "погода в москве", 9, 1, None)
+        await provider.search(client, "погода в москве", 9, None)
     request = route.calls.last.request
     assert str(request.url) == OCTEN_SEARCH_ENDPOINT
     assert request.method == "POST"
@@ -159,7 +159,7 @@ async def test_count_is_clamped_to_the_documented_range(make_config, num_results
     )
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", num_results, 1, None)
+        await provider.search(client, "q", num_results, None)
     assert _body(route)["count"] == expected
 
 
@@ -186,7 +186,7 @@ async def test_language_is_sent_as_a_one_element_list(make_config, language, exp
     )
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, language)
+        await provider.search(client, "q", 5, language)
     assert _body(route)["language"] == [expected]
 
 
@@ -200,7 +200,7 @@ async def test_unmappable_language_omits_the_field_entirely(make_config, languag
     )
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, language)
+        await provider.search(client, "q", 5, language)
     assert "language" not in _body(route)
 
 
@@ -213,36 +213,6 @@ def test_language_enum_matches_the_documented_set():
     }  # fmt: skip
 
 
-# -- paging ----------------------------------------------------------------
-
-
-@respx.mock
-async def test_second_page_is_refused_without_a_request(make_config):
-    # No page/offset/cursor exists in the schema, so page 2 could only re-run
-    # and re-bill the same search.
-    route = respx.post(OCTEN_SEARCH_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=OCTEN_PAYLOAD)
-    )
-    provider = OctenSearch(make_config("octen_search", api_key="k"))
-    async with httpx.AsyncClient() as client:
-        with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 2, None)
-    assert "no pagination" in str(excinfo.value)
-    assert route.call_count == 0
-
-
-@respx.mock
-@pytest.mark.parametrize("page", [0, -5, 1])
-async def test_first_or_non_positive_page_is_served(make_config, page):
-    route = respx.post(OCTEN_SEARCH_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=OCTEN_PAYLOAD)
-    )
-    provider = OctenSearch(make_config("octen_search", api_key="k"))
-    async with httpx.AsyncClient() as client:
-        assert len(await provider.search(client, "q", 5, page, None)) == 2
-    assert route.call_count == 1
-
-
 # -- failures --------------------------------------------------------------
 
 
@@ -252,7 +222,7 @@ async def test_payment_required_is_a_provider_error(make_config):
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "out of credits" in str(excinfo.value)
     assert route.call_count == 1
 
@@ -271,7 +241,7 @@ async def test_insufficient_balance_403_is_reported_as_out_of_credits(make_confi
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "out of credits (HTTP 403)" in str(excinfo.value)
     assert "client error" not in str(excinfo.value)
     assert route.call_count == 1  # 4xx is never retried
@@ -285,7 +255,7 @@ async def test_invalid_json_is_a_provider_error(make_config):
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "invalid JSON" in str(excinfo.value)
 
 
@@ -308,7 +278,7 @@ async def test_error_envelope_inside_http_200_raises(make_config):
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "API error" in str(excinfo.value)
     assert route.call_count == 1
 
@@ -336,10 +306,10 @@ async def test_envelope_code_decides_success(make_config, code, is_success):
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
         if is_success:
-            assert await provider.search(client, "q", 5, 1, None)
+            assert await provider.search(client, "q", 5, None)
         else:
             with pytest.raises(ProviderError) as excinfo:
-                await provider.search(client, "q", 5, 1, None)
+                await provider.search(client, "q", 5, None)
             assert "API error" in str(excinfo.value)
 
 
@@ -367,7 +337,7 @@ async def test_highlight_as_a_list_is_joined_not_crashed(make_config):
     respx.post(OCTEN_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
     provider = OctenSearch(make_config("octen_search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        out = await provider.search(client, "q", 5, 1, None)
+        out = await provider.search(client, "q", 5, None)
     assert len(out) == 1
     # Non-strings dropped, blanks dropped, the rest joined and trimmed.
     assert out[0].snippet == "first fragment second fragment"

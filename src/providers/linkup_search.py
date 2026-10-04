@@ -36,7 +36,7 @@ it is also the fastest and the pipeline awaits every search provider.
 Documented statuses: 400 invalid parameters, 401 invalid/missing key, 402
 (payment details returned in the ``payment-required`` header), 429 "Rate limit
 exceeded or insufficient credits" — 402/429 are already a hard failure in
-``_http.py``. There is no pagination parameter and no language parameter.
+``_http.py``. There is no language parameter.
 """
 
 from __future__ import annotations
@@ -80,17 +80,8 @@ class LinkupSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
-        # No pagination in the API: page 2+ would repeat page 1's hits at full
-        # price, so refuse rather than silently re-serve them (same rule as
-        # brave beyond its depth limit).
-        if page > 1:
-            raise ProviderError(
-                f"{self.name}: page {page} is unavailable (linkup has no pagination)"
-            )
-
         body: dict[str, Any] = {
             "q": query,
             "depth": LINKUP_DEPTH,

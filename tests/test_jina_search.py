@@ -49,7 +49,7 @@ async def test_parses_the_reader_style_envelope(make_config):
     )
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [(r.title, r.url, r.snippet, r.source) for r in results] == [
         ("First hit", "https://jina.test/1", "snippet one", "jina-search"),
         ("Second hit", "https://jina.test/2", "snippet two", "jina-search"),
@@ -77,7 +77,7 @@ async def test_snippet_falls_back_to_content(make_config):
     )
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert results[0].snippet == "from content"
 
 
@@ -96,7 +96,7 @@ async def test_missing_or_empty_data_is_an_empty_result_list(make_config, payloa
     respx.post(JINA_SEARCH_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        assert await provider.search(client, "q", 5, 1, None) == []
+        assert await provider.search(client, "q", 5, None) == []
 
 
 @respx.mock
@@ -116,7 +116,7 @@ async def test_items_without_url_are_skipped(make_config):
     )
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [r.url for r in results] == ["https://jina.test/ok"]
 
 
@@ -133,7 +133,7 @@ async def test_error_envelope_with_http_200_raises_provider_error(make_config):
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError) as excinfo:
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
     assert "code 422" in str(excinfo.value)
 
 
@@ -155,7 +155,7 @@ async def test_string_code_200_envelope_parses_as_success(make_config):
     )
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        results = await provider.search(client, "q", 5, 1, None)
+        results = await provider.search(client, "q", 5, None)
     assert [(r.title, r.url, r.snippet) for r in results] == [
         ("T", "https://jina.test/s", "d")
     ]
@@ -169,7 +169,7 @@ async def test_invalid_json_raises_provider_error(make_config):
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderError):
-            await provider.search(client, "q", 5, 1, None)
+            await provider.search(client, "q", 5, None)
 
 
 # -- request shape ---------------------------------------------------------
@@ -185,7 +185,7 @@ async def test_num_is_omitted_at_default_serp_depth(make_config, num_results):
     )
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", num_results, 1, None)
+        await provider.search(client, "q", num_results, None)
     body = _sent_body(route)
     assert body["q"] == "q"
     assert "num" not in body
@@ -198,7 +198,7 @@ async def test_num_is_sent_when_more_than_the_default_depth(make_config):
     )
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 15, 1, None)
+        await provider.search(client, "q", 15, None)
     assert _sent_body(route)["num"] == 15
 
 
@@ -212,7 +212,7 @@ async def test_num_is_clamped_to_the_documented_cap(make_config):
     )
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 80, 1, None)
+        await provider.search(client, "q", 80, None)
     assert _sent_body(route)["num"] == 50  # clamped to JINA_SEARCH_NUM_MAX
 
 
@@ -232,7 +232,7 @@ async def test_language_reduces_to_the_two_letter_hl(make_config, language, expe
     )
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, language)
+        await provider.search(client, "q", 5, language)
     assert _sent_body(route)["hl"] == expected
 
 
@@ -246,26 +246,8 @@ async def test_non_two_letter_language_omits_hl(make_config, language):
     )
     provider = JinaSearch(make_config("jina-search", api_key="k"))
     async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, language)
+        await provider.search(client, "q", 5, language)
     assert "hl" not in _sent_body(route)
-
-
-@respx.mock
-async def test_page_is_omitted_for_the_first_page_and_sent_beyond(make_config):
-    route = respx.post(JINA_SEARCH_ENDPOINT).mock(
-        return_value=httpx.Response(200, json=JINA_PAYLOAD)
-    )
-    provider = JinaSearch(make_config("jina-search", api_key="k"))
-    async with httpx.AsyncClient() as client:
-        await provider.search(client, "q", 5, 1, None)
-        first = _sent_body(route)
-        await provider.search(client, "q", 5, 3, None)
-        third = _sent_body(route)
-    assert "page" not in first
-    assert third["page"] == 3
-    # `gl` is never sent — the tool contract has no country input.
-    assert "gl" not in first
-    assert "gl" not in third
 
 
 def test_requires_an_api_key(make_config):

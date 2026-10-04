@@ -42,8 +42,6 @@ status of its own (429). Code 15 is the one that is NOT a failure —
 Parameters (https://xmlriver.com/apiydoc/apiy-about/ for Yandex,
 https://xmlriver.com/apidoc/api-about/ for Google):
 
-- ``page`` — "первая страница в Яндексе имеет номер 0, а в Google – 1", so the
-  0/1 base depends on the engine.
 - ``groupby`` (the TOP size) is deliberately NOT sent. Yandex documents the
   single value 10, and a TOP100 account setting applies ONLY while groupby is
   absent from the GET request ("при передаче GET-параметра groupby=100, но не
@@ -83,8 +81,9 @@ XMLRIVER_ENDPOINTS = {
     "google": "https://xmlriver.com/search/xml",
 }
 
-# Number of the FIRST result page per engine (documented explicitly: Yandex
-# counts pages from zero, Google from one).
+# Number of the FIRST result page per engine (documented explicitly: "первая
+# страница в Яндексе имеет номер 0, а в Google – 1"). Always sent: the docs do
+# not say which page an omitted `page` means.
 XMLRIVER_FIRST_PAGE = {"yandex": 0, "google": 1}
 
 # "Nothing found for this query" — the one error code the docs call acceptable
@@ -149,23 +148,18 @@ class XmlRiverSearch:
         client: httpx.AsyncClient,
         query: str,
         num_results: int,
-        page: int,
         language: str | None,
     ) -> list[SearchResult]:
         # `num_results` cannot be passed on: the TOP size is fixed at 10 per
         # request by the vendor and `groupby` must stay absent — see the module
-        # docstring. Paging is the only way deeper, and it is supported, so
-        # page > 1 is a normal request here (no depth refusal like brave's).
-        first_page = XMLRIVER_FIRST_PAGE[self._engine]
+        # docstring.
         params: dict[str, Any] = {
             "user": self._config.token,
             "key": self._config.api_key,
             # httpx percent-encodes the value, which also covers the vendor's
             # "амперсанд (&) ... необходимо заменять на код %26" rule.
             "query": query,
-            # max(0, ...) covers page <= 0: nothing upstream clamps `page`
-            # (src/server.py clamps only num_results).
-            "page": first_page + max(0, page - 1),
+            "page": XMLRIVER_FIRST_PAGE[self._engine],
         }
         if language and self._engine == "yandex":
             # Google's language parameter is `lr`, a numeric id from a vendor

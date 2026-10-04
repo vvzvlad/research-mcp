@@ -56,7 +56,7 @@ def _results():
 
 
 def test_renders_title_url_snippet():
-    out = format_search_results(_outcome(_results()), query="foo", page=1)
+    out = format_search_results(_outcome(_results()), query="foo")
     assert "First result" in out
     assert "https://example.com/a" in out
     assert "Snippet about the first thing." in out
@@ -66,14 +66,14 @@ def test_renders_title_url_snippet():
 
 def test_empty_results_message():
     # At least one instance answered → an honestly empty result set.
-    out = format_search_results(_outcome([]), query="nothing here", page=2)
+    out = format_search_results(_outcome([]), query="nothing here")
     assert "ничего не найдено" in out.lower()
     assert "nothing here" in out
 
 
 def test_snippet_newlines_collapsed():
     results = [SearchResult(title="t", url="u", snippet="line one\nline two", source="x")]
-    out = format_search_results(_outcome(results), query="q", page=1)
+    out = format_search_results(_outcome(results), query="q")
     assert "line one line two" in out
 
 

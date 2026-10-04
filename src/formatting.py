@@ -62,7 +62,7 @@ def _failed_part(count: int, reasons: Iterable[str]) -> str:
     return f"ошибок: {count}"
 
 
-def format_search_results(outcome: SearchOutcome, query: str, page: int) -> str:
+def format_search_results(outcome: SearchOutcome, query: str) -> str:
     """Render a search outcome as a numbered Markdown list.
 
     Each item is ``N. **title**\\n   url\\n   snippet``. With no results there
@@ -74,13 +74,13 @@ def format_search_results(outcome: SearchOutcome, query: str, page: int) -> str:
     if not outcome.results:
         if not outcome.answered and not outcome.empty:
             return (
-                f'Поиск по запросу "{query}" (стр. {page}) не выполнен: все поисковые '
+                f'Поиск по запросу "{query}" не выполнен: все поисковые '
                 "провайдеры вернули ошибку. Это сбой поиска, а не пустая выдача — "
                 "имеет смысл повторить запрос позже."
             )
-        return f'По запросу "{query}" (стр. {page}) ничего не найдено.'
+        return f'По запросу "{query}" ничего не найдено.'
 
-    lines: list[str] = [f'Результаты поиска: "{query}" (стр. {page})', ""]
+    lines: list[str] = [f'Результаты поиска: "{query}"', ""]
     for index, item in enumerate(outcome.results, start=1):
         title = (item.title or "(без заголовка)").strip()
         url = (item.url or "").strip()
