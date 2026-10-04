@@ -320,7 +320,9 @@ async def test_read_instagram_url_returns_the_transcript(monkeypatch, settings, 
 
 @respx.mock
 async def test_read_instagram_routes_via_instagram_and_groq_proxies(monkeypatch, settings):
-    # Each upstream gets the client bound to its own proxy. respx intercepts
+    # Each upstream gets a client bound to its own proxy: the Instagram call
+    # goes through the pipeline's client for INSTAGRAM_PROXY, the Groq call
+    # through the reader's own client, bound to GROQ_PROXY. respx intercepts
     # above the SOCKS transport, like in test_read_youtube_routes_via_youtube_proxy.
     _clear_provider_env(monkeypatch)
     _public_dns(monkeypatch)
@@ -331,6 +333,15 @@ async def test_read_instagram_routes_via_instagram_and_groq_proxies(monkeypatch,
     monkeypatch.setenv("GROQ_PROXY", groq_proxy)
     respx.post(GRAPHQL_ENDPOINT).mock(return_value=httpx.Response(200, json=_post()))
     respx.post(GROQ_ENDPOINT).mock(return_value=httpx.Response(200, json=GROQ_ANSWER))
+    # Record the proxy every client is created with.
+    proxies: dict[httpx.AsyncClient, str | None] = {}
+
+    class _RecordingClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            proxies[self] = kwargs.get("proxy")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _RecordingClient)
 
     pipe = Pipeline.build(settings)
     requested: list[str | None] = []
@@ -341,13 +352,15 @@ async def test_read_instagram_routes_via_instagram_and_groq_proxies(monkeypatch,
         return client_for(wanted)
 
     monkeypatch.setattr(pipe._clients, "client_for", _spy)
+    reader = next(p for p in pipe._read if p.name == "instagram")
     try:
         outcome = await pipe.read(POST_URL)
     finally:
         await pipe.aclose()
 
     assert outcome.provider == "instagram"
-    assert requested == [instagram_proxy, groq_proxy]
+    assert requested == [instagram_proxy]
+    assert proxies[reader._groq_client] == groq_proxy
 
 
 @respx.mock
@@ -614,8 +627,8 @@ async def test_fetch_profile_posts_html_answer_is_classified_bot_protection():
 @pytest.mark.parametrize("groq_key", [None, GROQ_KEY])
 @respx.mock
 async def test_read_profile_url_returns_the_posts(monkeypatch, settings, capture_logs, groq_key):
-    # The path needs no Groq key, and is never billed — not even when the key
-    # puts "instagram" into the paid set for the transcript path.
+    # The reader needs no Groq key, and is never paid — not even when the key
+    # enables the paid "instagram" transcript instance.
     _clear_provider_env(monkeypatch)
     _public_dns(monkeypatch)
     if groq_key:
@@ -631,15 +644,15 @@ async def test_read_profile_url_returns_the_posts(monkeypatch, settings, capture
     finally:
         await pipe.aclose()
 
-    assert outcome.provider == "instagram"
-    assert outcome.tried == ["instagram"]
+    assert outcome.provider == "instagram-profile"
+    assert outcome.tried == ["instagram-profile"]
     assert outcome.failures == []
     assert outcome.markdown == EXPECTED_PROFILE_MARKDOWN
     # The probe, the read chain and Groq never ran.
     assert probe.call_count == 0
     assert jina.call_count == 0
     assert groq.call_count == 0
-    line = next(m for m in capture_logs if "provider=instagram ok=true" in m)
+    line = next(m for m in capture_logs if "provider=instagram-profile ok=true" in m)
     assert "paid_calls=0" in line
 
 
@@ -665,7 +678,7 @@ async def test_read_profile_routes_via_instagram_proxy(monkeypatch, settings):
     finally:
         await pipe.aclose()
 
-    assert outcome.provider == "instagram"
+    assert outcome.provider == "instagram-profile"
     assert requested == [instagram_proxy]
 
 
@@ -688,5 +701,5 @@ async def test_read_profile_failure_falls_through(monkeypatch, settings):
         await pipe.aclose()
 
     assert outcome.provider == "jina"
-    assert outcome.tried == ["instagram", "trafilatura", "jina"]
-    assert outcome.failures[0] == ("instagram", "empty")
+    assert outcome.tried == ["instagram-profile", "trafilatura", "jina"]
+    assert outcome.failures[0] == ("instagram-profile", "empty")

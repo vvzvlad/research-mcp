@@ -17,7 +17,9 @@ a volume across restarts/image updates).
 
 ## Project structure
 - `src/providers/base.py` — `SearchProvider` / `ReadProvider` interfaces,
-  `SearchResult`, `ProviderError`, `ProviderConfig`.
+  `UrlSpecificReader` (a reader that `accepts` only some urls; offered them
+  before the probe, its answer is final whatever its length), `SearchResult`,
+  `ProviderError`, `ProviderConfig`.
 - `src/providers/registry.py` — `@register` decorator + `REGISTRY`.
 - `src/providers/_http.py` — shared retry + 402/429 → failover policy, plus
   `_CREDIT_MARKERS`: a 4xx whose body reports an exhausted balance (serper's
@@ -41,18 +43,20 @@ a volume across restarts/image updates).
   row's href could be read. An empty list means only that the search ran and left
   nothing: DuckDuckGo's own "no results" page, or a page of ads only.
 - `src/providers/pdf.py` — PDF detection + pypdf extraction (used by the pipeline, not a tool).
-- `src/providers/youtube.py` — YouTube video-url detection + transcript fetch via
-  YouTube's player API (ANDROID client); used by `Pipeline.read` before the
-  probe, a failure falls through to the read chain. Routed via `YOUTUBE_PROXY`.
-- `src/providers/instagram.py` — Instagram video-url detection + audio transcript:
-  one anonymous POST to Instagram's web GraphQL (logged-out post query; it
-  answers JSON only with the `Sec-Fetch-*` headers), then Groq Whisper
-  transcribes the audio-only DASH track by url. Used by `Pipeline.read` after the
-  YouTube step, only when `GROQ_API_KEY` is set; a failure falls through to the
-  read chain. Routed via `INSTAGRAM_PROXY` / `GROQ_PROXY`. A profile url
-  (`instagram.com/<username>/`) is answered with its posts, 12 per page, via the
-  logged-out profile posts query (no key, not billed); the `?after=<cursor>`
-  url in the answer's last line is the next page.
+- `src/providers/youtube.py` — the `youtube` read type, a `UrlSpecificReader`:
+  YouTube video-url detection + transcript fetch via YouTube's player API
+  (ANDROID client); offered only video urls, before the probe, a failure falls
+  through to the rest of the read chain. Routed via `YOUTUBE_PROXY`.
+- `src/providers/instagram.py` — two `UrlSpecificReader` read types. `instagram`:
+  Instagram video-url detection + audio transcript: one anonymous POST to
+  Instagram's web GraphQL (logged-out post query; it answers JSON only with the
+  `Sec-Fetch-*` headers), then Groq Whisper transcribes the audio-only DASH
+  track by url. Its api key is `GROQ_API_KEY` (no key, no instance; paid); a
+  failure falls through to the read chain. Routed via `INSTAGRAM_PROXY`, the Groq
+  call via `GROQ_PROXY` on a client the reader owns. `instagram_profile`: a
+  profile url (`instagram.com/<username>/`) is answered with its posts, 12 per
+  page, via the logged-out profile posts query (no key, free); the
+  `?after=<cursor>` url in the answer's last line is the next page.
 - `src/pipeline_config.py` — `INSTANCES`, `SEARCH_PIPELINE`, `READ_PIPELINE`.
 - `src/pipeline.py` — instance loader, `ClientManager` (one httpx client per
   proxy URL), search (merge/dedup/rerank) and read (fallback) logic, plus
@@ -83,7 +87,7 @@ a volume across restarts/image updates).
 - stderr + a persistent file sink at `data/research-mcp.log` (loguru rotation +
   retention; survives restart/image update via the `data/` volume).
 - `pipeline.search` / `pipeline.read` emit one per-request line each (tool,
-  target url/query, winning provider/tier or `pdf`/`youtube`/`instagram`, count, latency, ok); the
+  target url/query, winning provider/tier or `pdf`, count, latency, ok); the
   search line also names the instances that came back `empty=` and those that
   `failed=`, with their `reasons=` categories (the failed read line carries them
   too); `read_pages` adds a `count/ok` summary and `search_and_read` a
@@ -94,11 +98,13 @@ a volume across restarts/image updates).
 - An external instance can route through a SOCKS5/HTTP proxy via `<INSTANCE>_PROXY`
   (`EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`, `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`,
   `FIRECRAWL_PROXY`, `XMLRIVER_PROXY`, `PARALLEL_PROXY`, `OCTEN_PROXY`, `LINKUP_PROXY`,
-  `YOUCOM_PROXY`, `BRIGHTDATA_PROXY`); internal instances (searxng/crawl4ai/trafilatura) have none.
-- `YOUTUBE_PROXY`, `INSTAGRAM_PROXY` and `GROQ_PROXY` are the proxy vars outside
-  `INSTANCES`: `Pipeline.build` reads them for the YouTube path and the two
-  Instagram paths (`INSTAGRAM_PROXY` serves both the transcript and the
-  keyless profile listing), like `JINA_PROXY` for the reranker.
+  `YOUCOM_PROXY`, `BRIGHTDATA_PROXY`, `YOUTUBE_PROXY`, `INSTAGRAM_PROXY` — the
+  latter shared by `instagram` and `instagram-profile`); internal instances
+  (searxng/crawl4ai/trafilatura) have none.
+- `GROQ_PROXY` is no `proxy_env`: the `instagram` instance names it in
+  `Instance.options_env`, the loader resolves it into
+  `ProviderConfig.options["groq_proxy"]`, and the reader binds its own Groq
+  client to it — api.groq.com is that instance's second upstream.
 - `Instance.proxy_env` holds the ENV var NAME (never a value); the loader resolves
   it into `ProviderConfig.proxy`, exposed as `provider.proxy`.
 - `ClientManager.client_for(proxy)` lazily creates/caches one httpx client per

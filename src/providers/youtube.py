@@ -1,9 +1,9 @@
 """YouTube video transcripts via YouTube's own player API.
 
-Not a registered provider — like ``pdf.py`` it is invoked directly by the read
-pipeline: ``Pipeline.read`` asks ``video_id`` whether a url is a YouTube video
-and, if it is, tries ``fetch_transcript`` before the probe. A plain fetch of a
-watch page yields only the page chrome; the transcript lives behind two calls:
+The ``youtube`` read provider (``YouTubeRead``), a ``UrlSpecificReader``: it
+accepts only the urls ``video_id`` recognises as a YouTube video, and the read
+pipeline offers it those before the probe. A plain fetch of a watch page yields
+only the page chrome; the transcript lives behind two calls:
 
 1. ``POST /youtubei/v1/player`` as the ANDROID client (the one
    youtube-transcript-api 1.2.4 uses — the WEB client answers UNPLAYABLE) →
@@ -26,7 +26,8 @@ import httpx
 
 from src import failure_reason
 from src.providers._http import request_with_retry
-from src.providers.base import ProviderError
+from src.providers.base import ProviderConfig, ProviderError
+from src.providers.registry import register
 
 PLAYER_ENDPOINT = "https://www.youtube.com/youtubei/v1/player"
 
@@ -245,3 +246,19 @@ async def fetch_transcript(client: httpx.AsyncClient, video_id: str, retries: in
         lines += ["## Description", "", description, ""]
     lines += ["## Transcript", "", "\n\n".join(_paragraphs(snippets))]
     return "\n".join(lines)
+
+
+@register("youtube")
+class YouTubeRead:
+    """Read a YouTube video url as its transcript (no key needed)."""
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self.name = config.name
+        self.proxy = config.proxy
+        self._config = config
+
+    def accepts(self, url: str) -> bool:
+        return video_id(url) is not None
+
+    async def read(self, client: httpx.AsyncClient, url: str) -> str:
+        return await fetch_transcript(client, video_id(url), self._config.retries)

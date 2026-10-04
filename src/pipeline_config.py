@@ -28,6 +28,9 @@ class Instance:
     jina) that may run without its key — it stays enabled even if the key var is
     unset. ``proxy_env`` (optional) names a var holding a SOCKS5/HTTP proxy URL
     to route this instance's outbound requests through; unset → direct egress.
+    ``options_env`` pairs an option key with the ENV VARIABLE NAME holding its
+    value; always optional — each var that is set lands in
+    ``ProviderConfig.options`` under its key, an unset one is simply left out.
     """
 
     name: str
@@ -37,6 +40,7 @@ class Instance:
     token_env: str | None = None
     proxy_env: str | None = None
     optional_api_key: bool = False
+    options_env: tuple[tuple[str, str], ...] = ()
 
 
 # All instances that *could* run. An instance is actually enabled at startup
@@ -110,6 +114,25 @@ INSTANCES: list[Instance] = [
     Instance("serper", "serper", api_key_env="SERPER_API_KEY", proxy_env="SERPER_PROXY"),
     Instance("exa", "exa", api_key_env="EXA_API_KEY", proxy_env="EXA_PROXY"),
     # --- read ---
+    # The url-specific readers: each serves only the urls it accepts, ahead of
+    # the probe. Their hosts are fixed, so they fetch with the plain client bound
+    # to their proxy, not the SSRF-guarded one.
+    # YouTube transcripts need no key. Some hosts (prod among them) cannot reach
+    # youtube.com directly, or are flagged by it as a bot — hence the proxy.
+    Instance("youtube", "youtube", proxy_env="YOUTUBE_PROXY"),
+    # Instagram post transcripts: Groq Whisper transcribes the audio, so the key
+    # is Groq's and no key means no instance. Two upstreams, two proxies:
+    # INSTAGRAM_PROXY for instagram.com where Instagram is blocked, GROQ_PROXY
+    # for api.groq.com where Groq answers "Forbidden" for the egress country.
+    Instance(
+        "instagram",
+        "instagram",
+        api_key_env="GROQ_API_KEY",
+        proxy_env="INSTAGRAM_PROXY",
+        options_env=(("groq_proxy", "GROQ_PROXY"),),
+    ),
+    # An Instagram profile's posts need no key; same instagram.com proxy.
+    Instance("instagram-profile", "instagram_profile", proxy_env="INSTAGRAM_PROXY"),
     Instance("trafilatura", "trafilatura"),
     # jina works keyless (lower rate limit); the key is optional.
     Instance(
@@ -173,8 +196,12 @@ SEARCH_PIPELINE: list[str] = [
 ]
 # Read is sequential and stops at the first sufficient answer, so here the order
 # IS a cost gate: brightdata sits last because it is the only one that bills for
-# pages the cheap providers already handle.
+# pages the cheap providers already handle. The url-specific readers come first:
+# they run before the probe, on the urls they accept only.
 READ_PIPELINE: list[str] = [
+    "youtube",
+    "instagram",
+    "instagram-profile",
     "trafilatura",
     "jina",
     "crawl4ai",
@@ -209,5 +236,6 @@ PAID_TYPES: frozenset[str] = frozenset(
         "linkup_search",
         "youcom_search",
         "brightdata",
+        "instagram",  # Groq bills every transcription
     }
 )

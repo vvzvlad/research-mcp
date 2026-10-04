@@ -83,10 +83,13 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   that needs no configuration, which is why it sits directly behind
   `searxng`: it is on everywhere, but a deployment that runs SearXNG must
   keep SearXNG's copy of every shared url.
-- **Read pipeline** (`trafilatura → jina → crawl4ai → tavily-1 → tavily-2 →
-  firecrawl → brightdata`): here the order IS a cost gate — it stops at the
-  first sufficient answer, and `brightdata` (the anti-bot unlocker) sits last so
-  it only ever sees pages everything cheaper already bounced off. A single probe
+- **Read pipeline** (`youtube → instagram → instagram-profile → trafilatura →
+  jina → crawl4ai → tavily-1 → tavily-2 → firecrawl → brightdata`): here the
+  order IS a cost gate — it stops at the first sufficient answer, and
+  `brightdata` (the anti-bot unlocker) sits last so it only ever sees pages
+  everything cheaper already bounced off. The first three are url-specific
+  readers: each is offered only the urls it recognises, ahead of the probe, and
+  its answer is final (see below). A single probe
   GET classifies the url. PDFs (Content-Type /
   `.pdf` / `%PDF` magic) are extracted with pypdf — except a PDF with **no text
   layer** (a scan), which falls through into the chain so the remote readers get
@@ -185,8 +188,9 @@ of one shared monthly pool. Search runs on every query and will drain that pool
 well before the readers do; when it runs out, both halves stop working.
 Keyless until registered: `XMLRIVER_USER_ID` + `XMLRIVER_API_KEY` (Yandex SERP),
 `PARALLEL_API_KEY`, `OCTEN_API_KEY`, `LINKUP_API_KEY`, `YOUCOM_API_KEY`, and
-`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `GROQ_API_KEY` is not an instance: it
-turns on the Instagram transcript path of the read pipeline.
+`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `GROQ_API_KEY` enables the `instagram`
+reader (Instagram transcripts); the `youtube` and `instagram-profile` readers
+take no key and are always on.
 
 ## Proxy
 
@@ -195,18 +199,21 @@ setting `<INSTANCE>_PROXY` — useful for clean egress past IP-based blocks (e.g
 Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`,
 `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`,
 `XMLRIVER_PROXY`, `PARALLEL_PROXY`, `OCTEN_PROXY`, `LINKUP_PROXY`,
-`YOUCOM_PROXY`, `BRIGHTDATA_PROXY`. The instances that do not need clean egress
+`YOUCOM_PROXY`, `BRIGHTDATA_PROXY`, `YOUTUBE_PROXY`, `INSTAGRAM_PROXY`. The
+instances that do not need clean egress
 have no proxy: the internal `searxng` / `crawl4ai` / `trafilatura` (which still
 take their own url/token vars) and the keyless `duckduckgo`.
 
-`YOUTUBE_PROXY` routes the YouTube transcript path (not an instance, see the read
-pipeline above). Where youtube.com is blocked — or the egress IP is flagged as a
+`YOUTUBE_PROXY` routes the `youtube` reader. Where youtube.com is blocked — or
+the egress IP is flagged as a
 bot, which YouTube answers with "Sign in to confirm you're not a bot" — transcripts
 work only through it.
 
-`INSTAGRAM_PROXY` routes every request to instagram.com — the reel transcript
-path and the profile post list alike (the latter needs no `GROQ_API_KEY`).
-`GROQ_PROXY` routes the transcription call to api.groq.com. Where Instagram is
+`INSTAGRAM_PROXY` routes every request to instagram.com — the `instagram`
+transcript reader and the `instagram-profile` post list alike (the latter needs
+no `GROQ_API_KEY`). `GROQ_PROXY` routes the `instagram` reader's transcription
+call to api.groq.com — an option of that instance, not a `<INSTANCE>_PROXY`:
+Groq is its second upstream. Where Instagram is
 blocked, or Groq answers `Forbidden` for the egress country, that leg works only
 through its proxy.
 
@@ -226,7 +233,7 @@ server writes a **persistent log file** to `data/research-mcp.log` (default;
 so it survives container restarts and image updates. The file carries one
 **per-request line** per tool call — search (`query`, which provider instances
 actually ran, result count, latency) and read (`url`, the winning provider/tier
-or `pdf`/`youtube`/`instagram`, `ok`, latency), plus a `read_pages count=N ok=K` summary — making it
+or `pdf`, `ok`, latency), plus a `read_pages count=N ok=K` summary — making it
 useful for analyzing how requests distribute across provider tiers. No request
 bodies or secrets are logged, only urls/queries, provider names, counts, timings.
 
@@ -246,8 +253,8 @@ the log file across updates) — we never build on prod.
 | `src/providers/registry.py` | `@register` decorator → `REGISTRY`. |
 | `src/providers/<type>.py` | One module per provider type. |
 | `src/providers/pdf.py` | PDF detection + pypdf text extraction (used by the pipeline). |
-| `src/providers/youtube.py` | YouTube video-url detection + transcript fetch (used by the pipeline). |
-| `src/providers/instagram.py` | Instagram url detection: post → audio transcript via Groq Whisper, profile → its posts with paging (used by the pipeline). |
+| `src/providers/youtube.py` | YouTube video-url detection + transcript fetch (the `youtube` url-specific reader). |
+| `src/providers/instagram.py` | Instagram url detection: post → audio transcript via Groq Whisper, profile → its posts with paging (the `instagram` / `instagram_profile` url-specific readers). |
 | `src/pipeline_config.py` | In-code instances + pipeline order. |
 | `src/pipeline.py` | Instance loader + search/read logic (and `search_and_read`, their composition). |
 | `src/rerank.py` | `JinaReranker` — post-merge rerank of search results. |

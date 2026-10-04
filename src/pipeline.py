@@ -14,18 +14,16 @@ order on any failure), and trims to ``num_results``. It returns a
 or failed — so the caller can tell "nothing matched" from "the search itself
 broke".
 
-Read first tries a YouTube video url as a transcript (``src/providers/youtube.py``,
-routed via ``YOUTUBE_PROXY``); a video without one falls through to the normal
-path. An Instagram post url is likewise tried as a Groq Whisper transcript of its
-audio (``src/providers/instagram.py``, enabled by ``GROQ_API_KEY``, routed via
-``INSTAGRAM_PROXY`` / ``GROQ_PROXY``); a failure falls through the same way.
-An Instagram profile url is read as one page of the profile's posts with the url
-of the next page (same module, no key needed, routed via ``INSTAGRAM_PROXY``);
-a failure falls through too.
-Read then detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic) and
-extracts them with pypdf. Otherwise it tries the enabled ``READ_PIPELINE``
-instances in order; the first to return content ``>= fallback_min_chars`` wins;
-thin/empty/error → next instance. It returns a ``ReadOutcome``: the markdown
+Read walks the enabled ``READ_PIPELINE`` instances in order. A
+``UrlSpecificReader`` (``src/providers/base.py``) is offered only the urls it
+accepts, before the probe — a YouTube video's transcript
+(``src/providers/youtube.py``), an Instagram post's audio transcript or an
+Instagram profile's posts (``src/providers/instagram.py``); its answer is final
+whatever its length, a failure falls through. Right before the first other
+instance, read detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic)
+and extracts them with pypdf. Otherwise the first instance to return content
+``>= fallback_min_chars`` wins; thin/empty/error → next instance. It returns a
+``ReadOutcome``: the markdown
 plus the winning provider, the chain that was walked and every failure along the
 way tagged with a ``src.failure_reason`` category. If all fail, it raises
 ``ReadFailed`` (a ``ProviderError``) carrying the same telemetry.
@@ -66,15 +64,11 @@ from src.providers.base import (
     ReadProvider,
     SearchProvider,
     SearchResult,
+    UrlSpecificReader,
 )
-from src.providers.instagram import fetch_profile_posts as fetch_instagram_profile_posts
-from src.providers.instagram import fetch_transcript as fetch_instagram_transcript
-from src.providers.instagram import profile as instagram_profile
-from src.providers.instagram import shortcode as instagram_shortcode
 from src.providers.pdf import NO_TEXT_LAYER_NOTICE, extract_pdf_text, looks_like_pdf
 from src.providers.registry import REGISTRY
 from src.providers.trafilatura import TrafilaturaRead, extract_markdown
-from src.providers.youtube import fetch_transcript, video_id
 from src.rerank import JinaReranker
 from src.settings import Settings
 
@@ -105,12 +99,12 @@ class SearchOutcome:
 class ReadOutcome:
     """One read request: the markdown plus how the pipeline got hold of it.
 
-    ``provider`` is the instance that won (``"pdf"`` / ``"youtube"`` /
-    ``"instagram"`` for the PDF, YouTube-transcript and Instagram transcript or
-    profile-posts paths, which no instance serves), ``tried`` is the chain
-    walked up to and including it (``"youtube"`` first for a video url,
-    ``"instagram"`` for a post or profile url), and ``failures`` pairs every
-    instance that did not deliver with its ``src.failure_reason`` category.
+    ``provider`` is the instance that won (``"pdf"`` for the PDF path, which no
+    instance serves — the only pseudo-provider; ``"youtube"`` / ``"instagram"``
+    / ``"instagram-profile"`` are ordinary instances), ``tried`` is the chain
+    walked up to and including it (a url-specific reader enters it only for a
+    url it accepts), and ``failures`` pairs every instance that did not deliver
+    with its ``src.failure_reason`` category.
     ``thin`` marks the last-resort branch: every instance came back under
     ``fallback_min_chars`` and the longest of those scraps is what is being
     returned.
@@ -219,7 +213,7 @@ def _resolve_instance(inst: Instance) -> ProviderConfig | None:
 
     An instance is disabled (returns None) when a required variable is unset. A
     variable is required unless it is the api key of an ``optional_api_key``
-    instance (e.g. jina).
+    instance (e.g. jina). The ``options_env`` vars that are set fill ``options``.
     """
     url = os.getenv(inst.url_env) if inst.url_env else None
     token = os.getenv(inst.token_env) if inst.token_env else None
@@ -227,6 +221,8 @@ def _resolve_instance(inst: Instance) -> ProviderConfig | None:
     # Proxy is always optional: unset → direct egress (no instance is disabled
     # for a missing proxy var).
     proxy = os.getenv(inst.proxy_env) if inst.proxy_env else None
+    # Options are always optional too: an unset var is simply left out.
+    options = {key: value for key, env in inst.options_env if (value := os.getenv(env))}
 
     if inst.url_env and not url:
         return None
@@ -235,7 +231,9 @@ def _resolve_instance(inst: Instance) -> ProviderConfig | None:
     if inst.api_key_env and not api_key and not inst.optional_api_key:
         return None
 
-    return ProviderConfig(name=inst.name, url=url, token=token, api_key=api_key, proxy=proxy)
+    return ProviderConfig(
+        name=inst.name, url=url, token=token, api_key=api_key, proxy=proxy, options=options
+    )
 
 
 class ClientManager:
@@ -340,10 +338,6 @@ class Pipeline:
         client: httpx.AsyncClient | None = None,
         paid_names: set[str] | frozenset[str] | None = None,
         reranker: JinaReranker | None = None,
-        youtube_proxy: str | None = None,
-        groq_api_key: str | None = None,
-        instagram_proxy: str | None = None,
-        groq_proxy: str | None = None,
     ) -> None:
         self._settings = settings
         self._search = search_instances
@@ -352,16 +346,6 @@ class Pipeline:
         # it transforms the merged list instead of producing results, so it is
         # wired separately from the provider lists.
         self._reranker = reranker
-        # Proxy for the YouTube transcript path (None = direct). Not an instance
-        # either: read() runs that path ahead of the probe and the read chain.
-        self._youtube_proxy = youtube_proxy
-        # The Instagram transcript path, also run by read() ahead of the probe:
-        # the Groq key that enables it (None = path off) and the proxies for
-        # its two upstreams (None = direct). The Instagram profile-posts path
-        # needs no key and shares the Instagram proxy.
-        self._groq_api_key = groq_api_key
-        self._instagram_proxy = instagram_proxy
-        self._groq_proxy = groq_proxy
         # Names of the enabled instances whose TYPE bills per successful request.
         self._paid: frozenset[str] = frozenset(paid_names or ())
         # Cumulative BILLED counters for this process: paid calls and total
@@ -403,8 +387,9 @@ class Pipeline:
                 continue
             # Provider-specific knobs travel in `options` — the designated
             # slot per ProviderConfig's docstring, so no dedicated config
-            # field is added per provider.
-            options: dict[str, str] = {}
+            # field is added per provider. The ones resolved from the
+            # instance's `options_env` are kept.
+            options: dict[str, str] = dict(config.options)
             if inst.type == "jina":
                 # Per-request token cap for the Reader; jina.py sends it as
                 # X-Token-Budget only in keyed (billed) mode.
@@ -448,7 +433,10 @@ class Pipeline:
                 "No search provider enabled. duckduckgo needs no config, so this "
                 "should not happen — check src/pipeline_config.py."
             )
-        if not read_instances:
+        # The url-specific readers (youtube, instagram-profile) are keyless and
+        # always enabled, so they do not count: an ordinary url needs a reader
+        # that takes every url.
+        if all(isinstance(p, UrlSpecificReader) for p in read_instances):
             raise ConfigError(
                 "No read provider enabled. trafilatura needs no config, so this "
                 "should not happen — check src/pipeline_config.py."
@@ -468,30 +456,6 @@ class Pipeline:
             paid_names.add(reranker.name)
             logger.info("Search rerank enabled (jina-reranker-v3.5)")
 
-        # The YouTube transcript path is not an instance, so its proxy is read
-        # here like the reranker's. Some hosts (prod among them) cannot reach
-        # youtube.com directly. The value is never logged.
-        youtube_proxy = os.getenv("YOUTUBE_PROXY")
-        if youtube_proxy:
-            logger.info("YouTube transcripts route via proxy")
-
-        # The Instagram transcript path is not an instance either. Groq does the
-        # transcription, so its key switches the path on; Instagram and Groq
-        # each get their own optional proxy. Values are never logged.
-        groq_api_key = os.getenv("GROQ_API_KEY")
-        instagram_proxy = os.getenv("INSTAGRAM_PROXY")
-        groq_proxy = os.getenv("GROQ_PROXY")
-        if groq_api_key:
-            # Groq bills every transcription, so the path joins the paid set.
-            paid_names.add("instagram")
-            logger.info("Instagram transcripts enabled (Groq Whisper)")
-            if groq_proxy:
-                logger.info("Groq transcription routes via proxy")
-        # The profile-posts path needs no key, so the Instagram proxy is used
-        # (and announced) either way.
-        if instagram_proxy:
-            logger.info("Instagram requests route via proxy")
-
         return cls(  # type: ignore[arg-type]
             settings,
             search_instances,
@@ -499,10 +463,6 @@ class Pipeline:
             client=client,
             paid_names=paid_names,
             reranker=reranker,
-            youtube_proxy=youtube_proxy,
-            groq_api_key=groq_api_key,
-            instagram_proxy=instagram_proxy,
-            groq_proxy=groq_proxy,
         )
 
     async def aclose(self) -> None:
@@ -528,10 +488,9 @@ class Pipeline:
         (SearXNG alive but its engines blocked, a keyed provider returning an
         empty page): it stays out of BOTH counters, so the ratio keeps a single
         meaning — of the calls that actually bought data, how many were paid.
-        The list may also carry the pseudo-instance names "jina-rerank" (a
-        successful rerank call) and "instagram" (a successful Groq
-        transcription) — deliberately not Instances in pipeline_config, so do
-        not look for them in INSTANCES. Returns
+        The list may also carry the pseudo-instance name "jina-rerank" (a
+        successful rerank call) — deliberately not an Instance in
+        pipeline_config, so do not look for it in INSTANCES. Returns
         (paid_calls_this_request, cumulative_paid_percent). Mutates the counters
         synchronously (no await), so it is safe under asyncio.gather concurrency.
         """
@@ -702,8 +661,8 @@ class Pipeline:
 
         def _log_ok(provider_name: str, suffix: str = "") -> None:
             # Fold the billed calls into the cumulative counters and emit the
-            # single success line. Used by the youtube / instagram / pdf / full /
-            # thin branches so the accounting fields stay identical everywhere.
+            # single success line. Used by the pdf / provider / thin branches so
+            # the accounting fields stay identical everywhere.
             paid_calls, pct = self._account(billed)
             logger.info(
                 "read url={} -> provider={} ok=true paid_calls={} cum_paid={} "
@@ -718,123 +677,22 @@ class Pipeline:
                 _ms(),
             )
 
-        # 0) A YouTube video: its page is only chrome, so ask YouTube for the
-        #    transcript first. The hosts are fixed (youtube.com), hence the plain
-        #    client bound to YOUTUBE_PROXY, not the guarded one. Not billed. Any
-        #    failure — no captions, a bot wall, a dead proxy — is recorded like a
-        #    read-provider failure and falls through to the normal path below,
-        #    which still returns whatever the page itself offers.
-        vid = video_id(url)
-        if vid is not None:
-            tried.append("youtube")
-            try:
-                markdown = await fetch_transcript(
-                    self._clients.client_for(self._youtube_proxy), vid, self._settings.retries
-                )
-            except ProviderError as exc:
-                errors.append(str(exc))
-                failures.append(("youtube", failure_reason.classify(exc)))
-                logger.info("read url={} -> youtube transcript failed: {}", url, exc)
-            except Exception as exc:  # noqa: BLE001 — treat as provider failure
-                errors.append(f"youtube: {exc}")
-                failures.append(("youtube", failure_reason.classify(exc)))
-                logger.info("read url={} -> youtube transcript failed: {}", url, exc)
-            else:
-                _log_ok("youtube")
-                return ReadOutcome(
-                    markdown=markdown,
-                    provider="youtube",
-                    tried=list(tried),
-                    failures=list(failures),
-                    thin=False,
-                    elapsed_ms=_ms(),
-                )
-
-        # 0b) An Instagram post: its page is a login wall, so fetch the post via
-        #     Instagram's GraphQL and have Groq transcribe the audio. Skipped
-        #     entirely without GROQ_API_KEY. The hosts are fixed (instagram.com,
-        #     api.groq.com), hence the plain clients bound to INSTAGRAM_PROXY /
-        #     GROQ_PROXY, not the guarded one. Billed: Groq charges for every
-        #     transcription. Any failure — a gated post, a bot wall, a Groq
-        #     error — is recorded like a read-provider failure and falls through
-        #     to the normal path below.
-        code = instagram_shortcode(url)
-        if code is not None and self._groq_api_key:
-            tried.append("instagram")
-            try:
-                markdown = await fetch_instagram_transcript(
-                    self._clients.client_for(self._instagram_proxy),
-                    self._clients.client_for(self._groq_proxy),
-                    code,
-                    self._groq_api_key,
-                    self._settings.retries,
-                )
-            except ProviderError as exc:
-                errors.append(str(exc))
-                failures.append(("instagram", failure_reason.classify(exc)))
-                logger.info("read url={} -> instagram transcript failed: {}", url, exc)
-            except Exception as exc:  # noqa: BLE001 — treat as provider failure
-                errors.append(f"instagram: {exc}")
-                failures.append(("instagram", failure_reason.classify(exc)))
-                logger.info("read url={} -> instagram transcript failed: {}", url, exc)
-            else:
-                billed.append("instagram")
-                _log_ok("instagram")
-                return ReadOutcome(
-                    markdown=markdown,
-                    provider="instagram",
-                    tried=list(tried),
-                    failures=list(failures),
-                    thin=False,
-                    elapsed_ms=_ms(),
-                )
-
-        # 0c) An Instagram profile: its page is a login wall too, so list one
-        #     page of the profile's posts via Instagram's GraphQL, with the url
-        #     of the next page. Needs no key and is not billed. Same plain client
-        #     bound to INSTAGRAM_PROXY as 0b. Any failure — an unknown or private
-        #     profile, a one-segment path that is no profile, a bot wall — is
-        #     recorded like a read-provider failure and falls through to the
-        #     normal path below.
-        handle = instagram_profile(url)
-        if handle is not None:
-            username, cursor = handle
-            tried.append("instagram")
-            try:
-                markdown = await fetch_instagram_profile_posts(
-                    self._clients.client_for(self._instagram_proxy),
-                    username,
-                    cursor,
-                    self._settings.retries,
-                )
-            except ProviderError as exc:
-                errors.append(str(exc))
-                failures.append(("instagram", failure_reason.classify(exc)))
-                logger.info("read url={} -> instagram profile failed: {}", url, exc)
-            except Exception as exc:  # noqa: BLE001 — treat as provider failure
-                errors.append(f"instagram: {exc}")
-                failures.append(("instagram", failure_reason.classify(exc)))
-                logger.info("read url={} -> instagram profile failed: {}", url, exc)
-            else:
-                _log_ok("instagram")
-                return ReadOutcome(
-                    markdown=markdown,
-                    provider="instagram",
-                    tried=list(tried),
-                    failures=list(failures),
-                    thin=False,
-                    elapsed_ms=_ms(),
-                )
-
-        # 1) One probe GET decides the path. If it is a PDF, we are done; if it
-        #    is HTML, reuse that body for the trafilatura step (no second GET).
-        #    The probe is a generic fetch + PDF/HTML detect, so it uses the
-        #    direct client (the proxied providers fetch with their own client).
-        #    The probe is NOT a provider call, so it is never billed.
+        # One walk over the read pipeline. A url-specific reader (a YouTube
+        # video, an Instagram post or profile) is offered only the urls it
+        # accepts, ahead of the probe; its answer is final whatever its length,
+        # and any failure of it is recorded like any other provider's and falls
+        # through to the rest of the chain.
+        #
+        # One probe GET, run lazily once right before the first provider that is
+        # not url-specific, decides the path. If it is a PDF, we are done; if it
+        # is HTML, reuse that body for the trafilatura step (no second GET).
+        # The probe is a generic fetch + PDF/HTML detect, so it uses the direct
+        # client (the proxied providers fetch with their own client). The probe
+        # is NOT a provider call, so it is never billed.
         # The probe never hard-fails: a fetch error or an unparseable "PDF"
         # defers to the read chain below (jina/tavily/firecrawl fetch server-side).
-        pdf_text, probe_html = await self._probe(self._clients.guarded_client_for(None), url)
-        # A PDF with a text layer is done here. A PDF WITHOUT one is a scan:
+        #
+        # A PDF with a text layer is done there. A PDF WITHOUT one is a scan:
         # pypdf has nothing to give and used to return the notice as a success,
         # which meant a scan never reached the read chain at all. Fall through
         # instead, keeping the notice as the last resort if the chain also comes
@@ -859,25 +717,34 @@ class Pipeline:
         # that shape of url occurs we have not counted. Widening the gate would
         # mean passing the probe's verdict down into the provider, which the
         # ReadProvider protocol has no room for today.
+        probed = False
+        probe_html: str | None = None
         pdf_notice: str | None = None
-        if pdf_text is not None:
-            if pdf_text != NO_TEXT_LAYER_NOTICE:
-                _log_ok("pdf")
-                # tried stays empty: the probe is not a provider call.
-                return ReadOutcome(
-                    markdown=pdf_text,
-                    provider="pdf",
-                    tried=list(tried),
-                    failures=list(failures),
-                    thin=False,
-                    elapsed_ms=_ms(),
-                )
-            pdf_notice = pdf_text
-
-        # 2) HTML path: walk the read pipeline until one yields enough content.
         best_thin: str | None = None
         best_thin_name: str | None = None
         for provider in self._read:
+            specific = isinstance(provider, UrlSpecificReader)
+            if specific and not provider.accepts(url):
+                continue
+            if not specific and not probed:
+                probed = True
+                pdf_text, probe_html = await self._probe(
+                    self._clients.guarded_client_for(None), url
+                )
+                if pdf_text is not None:
+                    if pdf_text != NO_TEXT_LAYER_NOTICE:
+                        _log_ok("pdf")
+                        # tried holds only the url-specific readers that failed
+                        # before it: the probe is not a provider call.
+                        return ReadOutcome(
+                            markdown=pdf_text,
+                            provider="pdf",
+                            tried=list(tried),
+                            failures=list(failures),
+                            thin=False,
+                            elapsed_ms=_ms(),
+                        )
+                    pdf_notice = pdf_text
             tried.append(provider.name)
             try:
                 content = await self._read_one(provider, url, probe_html)
@@ -897,7 +764,8 @@ class Pipeline:
             # suffix counts the extra billed calls. See _ESCALATIONS in
             # src/providers/jina.py for the current list of labels.
             billed.append(provider.name)
-            if len(content) >= self._settings.fallback_min_chars:
+            # A url-specific reader's answer is final whatever its length.
+            if specific or len(content) >= self._settings.fallback_min_chars:
                 _log_ok(provider.name)
                 return ReadOutcome(
                     markdown=content,

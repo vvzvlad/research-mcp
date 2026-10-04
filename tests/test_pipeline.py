@@ -16,8 +16,10 @@ from src.formatting import format_search_results
 from src.pipeline import Pipeline, ReadFailed
 from src.providers.base import ProviderError
 from src.providers.duckduckgo import DDG_ENDPOINT
+from src.providers.instagram import GRAPHQL_ENDPOINT, GROQ_ENDPOINT
 from src.providers.pdf import NO_TEXT_LAYER_NOTICE
 from src.providers.trafilatura import extract_markdown
+from src.providers.youtube import PLAYER_ENDPOINT
 from src.rerank import RERANK_ENDPOINT
 from src.settings import Settings
 from tests.conftest import (
@@ -578,6 +580,34 @@ async def test_read_html_uses_single_get(monkeypatch, settings):
     assert "main article body" in out
     assert "footer junk" not in out  # trafilatura stripped the chrome
     assert route.call_count == 1  # NOT fetched twice
+
+
+@respx.mock
+async def test_read_url_no_specific_reader_accepts_never_reaches_them(monkeypatch, settings):
+    # All three url-specific readers are on (GROQ_API_KEY enables the keyed
+    # one), but an article url is none of theirs: none of their upstreams is
+    # called and none of them enters the chain.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+    url = "https://good.test/article"
+    probe = respx.get(url).mock(return_value=httpx.Response(200, text=ARTICLE_HTML))
+    youtube = respx.post(PLAYER_ENDPOINT).mock(return_value=httpx.Response(500))
+    instagram = respx.post(GRAPHQL_ENDPOINT).mock(return_value=httpx.Response(500))
+    groq = respx.post(GROQ_ENDPOINT).mock(return_value=httpx.Response(500))
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+    assert pipe.read_names[:3] == ["youtube", "instagram", "instagram-profile"]
+    assert outcome.provider == "trafilatura"
+    assert outcome.tried == ["trafilatura"]
+    assert outcome.failures == []
+    assert probe.call_count == 1
+    assert youtube.call_count == 0
+    assert instagram.call_count == 0
+    assert groq.call_count == 0
 
 
 # -- lazy self-healing client (regression: "client has been closed") -------

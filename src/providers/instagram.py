@@ -1,10 +1,10 @@
 """Instagram via its logged-out GraphQL: reel transcripts (audio via Groq) and profile post lists.
 
-Not a registered provider — like ``youtube.py`` it is invoked directly by the
-read pipeline: ``Pipeline.read`` asks ``shortcode`` whether a url is an
-Instagram post and, if it is (and ``GROQ_API_KEY`` is set), tries
-``fetch_transcript`` before the probe. A plain fetch of a post page yields a
-login wall; the speech lives behind two calls:
+Two read providers, both ``UrlSpecificReader``s the read pipeline offers the
+urls they accept before the probe. ``instagram`` (``InstagramRead``, needs the
+Groq key) accepts the urls ``shortcode`` recognises as an Instagram post and
+answers with ``fetch_transcript``. A plain fetch of a post page yields a login
+wall; the speech lives behind two calls:
 
 1. ``POST /api/graphql`` anonymously (no cookies, no home-page fetch), the
    logged-out post query → the author, the caption and the video's DASH
@@ -15,10 +15,11 @@ login wall; the speech lives behind two calls:
 The result is rendered as Markdown: author, duration, language, the caption and
 the transcript cut into timestamped paragraphs.
 
-A profile url is the other path: ``profile`` recognises it and
-``fetch_profile_posts`` lists one page of the profile's posts through the same
-GraphQL endpoint (the logged-out profile posts query) — date, kind, url and
-caption per post, plus the url of the next page. No Groq call is involved.
+``instagram_profile`` (``InstagramProfileRead``, no key) accepts the urls
+``profile`` recognises as a profile and answers with ``fetch_profile_posts``:
+one page of the profile's posts through the same GraphQL endpoint (the
+logged-out profile posts query) — date, kind, url and caption per post, plus
+the url of the next page. No Groq call is involved.
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ import httpx
 
 from src import failure_reason
 from src.providers._http import request_with_retry
-from src.providers.base import ProviderError
+from src.providers.base import ProviderConfig, ProviderError
+from src.providers.registry import register
 from src.providers.youtube import _clock, _paragraphs
 
 GRAPHQL_ENDPOINT = "https://www.instagram.com/api/graphql"
@@ -335,3 +337,55 @@ async def fetch_profile_posts(
     else:
         lines += ["", "No more posts."]
     return "\n".join(lines)
+
+
+@register("instagram")
+class InstagramRead:
+    """Read an Instagram post url as a transcript of its audio (requires the Groq ``api_key``)."""
+
+    def __init__(self, config: ProviderConfig) -> None:
+        if not config.api_key:
+            raise ValueError("instagram requires an api_key (the Groq key)")
+        self.name = config.name
+        self.proxy = config.proxy
+        self._config = config
+        self._groq_proxy = config.options.get("groq_proxy")
+        self._groq_client: httpx.AsyncClient | None = None
+
+    def _groq(self) -> httpx.AsyncClient:
+        # The pipeline hands a reader ONE client, bound to its `proxy` (the
+        # Instagram one), but Groq is a second upstream with a proxy of its own,
+        # so this reader owns that client. Created lazily: the reader is built
+        # before the event loop starts, and a client created there would be
+        # bound to the wrong loop. Re-created if closed, so a closed client is
+        # never reused.
+        if self._groq_client is None or self._groq_client.is_closed:
+            self._groq_client = httpx.AsyncClient(
+                timeout=self._config.request_timeout, proxy=self._groq_proxy
+            )
+        return self._groq_client
+
+    def accepts(self, url: str) -> bool:
+        return shortcode(url) is not None
+
+    async def read(self, client: httpx.AsyncClient, url: str) -> str:
+        return await fetch_transcript(
+            client, self._groq(), shortcode(url), self._config.api_key, self._config.retries
+        )
+
+
+@register("instagram_profile")
+class InstagramProfileRead:
+    """Read an Instagram profile url as one page of its posts (no key needed)."""
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self.name = config.name
+        self.proxy = config.proxy
+        self._config = config
+
+    def accepts(self, url: str) -> bool:
+        return profile(url) is not None
+
+    async def read(self, client: httpx.AsyncClient, url: str) -> str:
+        username, cursor = profile(url)
+        return await fetch_profile_posts(client, username, cursor, self._config.retries)

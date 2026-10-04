@@ -111,6 +111,19 @@ class ReadProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class UrlSpecificReader(ReadProvider, Protocol):
+    """A reader that serves only some urls (a YouTube video, an Instagram post).
+
+    The pipeline offers it only the urls it ``accepts``, BEFORE the probe, and
+    its answer is final whatever its length.
+    """
+
+    def accepts(self, url: str) -> bool:
+        """True if this reader serves ``url``."""
+        ...
+
+
 # Browser-like User-Agent so plain sites do not block the direct-HTTP read path.
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
