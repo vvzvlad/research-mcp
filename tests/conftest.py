@@ -61,6 +61,19 @@ _PROVIDER_ENV_VARS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _drop_shell_no_proxy(monkeypatch) -> None:
+    """Keep the developer's shell NO_PROXY away from every test.
+
+    httpx reads NO_PROXY whenever a client is built, and httpx 0.28.1 cannot
+    parse an IPv6 CIDR entry in it (``fd00::/8`` → ``InvalidURL: Invalid port:
+    ':'``): every client construction fails, and with it ~400 tests. Measured
+    2026-10-04 on a shell exporting such a NO_PROXY; CI has none, so it was green.
+    """
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+
 def _clear_provider_env(monkeypatch) -> None:
     """Unset every provider ENV var so a test controls the enabled instances."""
     for var in _PROVIDER_ENV_VARS:
