@@ -10,6 +10,7 @@ from __future__ import annotations
 import httpx
 import trafilatura as _trafilatura
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import (
     BROWSER_USER_AGENT,
@@ -65,10 +66,13 @@ class TrafilaturaRead:
             # does not exist — worded like the other providers' target errors.
             if exc.status in (404, 410):
                 raise ProviderError(
-                    f"{self.name}: target page returned HTTP {exc.status}"
+                    f"{self.name}: target page returned HTTP {exc.status}",
+                    reason=failure_reason.for_target_status(exc.status),
                 ) from exc
             raise
         extracted = extract_markdown(response.text)
         if not extracted:
-            raise ProviderError(f"{self.name}: no main content extracted")
+            raise ProviderError(
+                f"{self.name}: no main content extracted", reason=failure_reason.EMPTY
+            )
         return extracted

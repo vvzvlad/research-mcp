@@ -32,6 +32,7 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import ProviderError
 from src.providers.youtube import _clock, _paragraphs
@@ -160,9 +161,9 @@ async def _graphql(
     try:
         return response.json()
     except ValueError as exc:
-        # src.failure_reason.classify keys on the "bot protection" wording.
         raise ProviderError(
-            "instagram: blocked by bot protection (an HTML page instead of JSON)"
+            "instagram: blocked by bot protection (an HTML page instead of JSON)",
+            reason=failure_reason.BOT_PROTECTION,
         ) from exc
 
 
@@ -213,11 +214,15 @@ async def fetch_transcript(
     data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
     media = (data.get("xig_polaris_media") or {}).get("if_not_gated_logged_out")
     if not media:
-        # "empty response" is the wording classify() maps to `empty`.
-        raise ProviderError("instagram: empty response (private, deleted or login-gated post)")
+        raise ProviderError(
+            "instagram: empty response (private, deleted or login-gated post)",
+            reason=failure_reason.EMPTY,
+        )
     audio_url = _audio_url(media)
     if not audio_url:
-        raise ProviderError("instagram: empty response (the post has no video)")
+        raise ProviderError(
+            "instagram: empty response (the post has no video)", reason=failure_reason.EMPTY
+        )
 
     # Groq rejects a form-urlencoded body: the fields must go as multipart.
     transcribed = await request_with_retry(
@@ -300,12 +305,16 @@ async def fetch_profile_posts(
     data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
     user = data.get("xig_user_by_username")
     if not user:
-        # "empty response" is the wording classify() maps to `empty`.
-        raise ProviderError("instagram: empty response (no such public profile)")
+        raise ProviderError(
+            "instagram: empty response (no such public profile)", reason=failure_reason.EMPTY
+        )
     timeline = user.get("polaris_ordered_timeline_connection") or {}
     edges = timeline.get("edges") or []
     if not edges:
-        raise ProviderError("instagram: empty response (the profile shows no posts)")
+        raise ProviderError(
+            "instagram: empty response (the profile shows no posts)",
+            reason=failure_reason.EMPTY,
+        )
 
     lines = [f"# @{username} on Instagram — posts"]
     for edge in edges:

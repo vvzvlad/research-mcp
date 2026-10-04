@@ -977,7 +977,9 @@ class Pipeline:
         if probe_html is not None and isinstance(provider, TrafilaturaRead):
             content = extract_markdown(probe_html)
             if not content:
-                raise ProviderError(f"{provider.name}: no main content extracted")
+                raise ProviderError(
+                    f"{provider.name}: no main content extracted", reason=failure_reason.EMPTY
+                )
             return content
         if isinstance(provider, TrafilaturaRead):
             # trafilatura is the only read provider that fetches the target url

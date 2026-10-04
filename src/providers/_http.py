@@ -19,6 +19,7 @@ import asyncio
 
 import httpx
 
+from src import failure_reason
 from src.providers.base import ProviderError
 
 # Errors worth a quick retry — usually a blip, not a permanent condition.
@@ -93,7 +94,8 @@ async def request_with_retry(
         if status in (402, 429):
             # Out of credits / rate limited — do NOT retry, fail over instead.
             reason = "out of credits" if status == 402 else "rate limited"
-            raise ProviderError(f"{provider}: {reason} (HTTP {status})")
+            category = failure_reason.NO_CREDITS if status == 402 else failure_reason.RATE_LIMIT
+            raise ProviderError(f"{provider}: {reason} (HTTP {status})", reason=category)
         if 500 <= status < 600:
             last_error = f"HTTP {status}"
             if attempt + 1 < attempts:
@@ -107,8 +109,15 @@ async def request_with_retry(
             # Failover behaviour is unchanged — every 4xx already fails over
             # without a retry.
             if _is_credit_exhaustion(response):
-                raise ProviderError(f"{provider}: out of credits (HTTP {status})")
-            raise ProviderError(f"{provider}: client error (HTTP {status})", status=status)
+                raise ProviderError(
+                    f"{provider}: out of credits (HTTP {status})",
+                    reason=failure_reason.NO_CREDITS,
+                )
+            raise ProviderError(
+                f"{provider}: client error (HTTP {status})",
+                status=status,
+                reason=failure_reason.ACCESS_DENIED if status in (401, 403) else None,
+            )
         return response
 
     # Unreachable, but keep the type checker and callers honest.

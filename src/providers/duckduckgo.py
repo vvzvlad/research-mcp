@@ -26,6 +26,7 @@ import httpx
 import lxml.etree
 import lxml.html
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import (
     BROWSER_USER_AGENT,
@@ -173,7 +174,8 @@ class DuckDuckGoSearch:
         now = time.monotonic()
         if now - self._last_call < _MIN_INTERVAL_SECONDS:
             raise ProviderError(
-                f"{self.name}: throttled (min interval {_MIN_INTERVAL_SECONDS:.0f}s)"
+                f"{self.name}: throttled (min interval {_MIN_INTERVAL_SECONDS:.0f}s)",
+                reason=failure_reason.RATE_LIMIT,
             )
         self._last_call = now
 
@@ -208,7 +210,9 @@ class DuckDuckGoSearch:
         # itself — otherwise the block would reach _parse and be reported as
         # broken markup.
         if response.status_code == 202:
-            raise ProviderError(f"{self.name}: rate limited (HTTP 202)")
+            raise ProviderError(
+                f"{self.name}: rate limited (HTTP 202)", reason=failure_reason.RATE_LIMIT
+            )
         return self._parse(response.text)
 
     def _parse(self, html: str) -> list[SearchResult]:

@@ -27,11 +27,17 @@ class ProviderError(Exception):
     ``status`` is set only by ``request_with_retry``'s plain-4xx branch (not
     402/429, not a credit-exhaustion 4xx, not 5xx) and is ``None`` otherwise —
     enough for a caller to tell "the site said 404" from other errors.
+    ``reason`` is the failure category (a ``src.failure_reason`` constant), set
+    by the raise site, which is the only place that knows it. ``None`` means
+    "let ``classify()`` look at the exception chain, else ``other``".
     """
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(
+        self, message: str, status: int | None = None, reason: str | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.reason = reason
 
 
 @dataclass(slots=True)

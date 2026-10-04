@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import ProviderConfig, ProviderError, SearchResult
 from src.providers.registry import register
@@ -79,7 +80,8 @@ class SearxngSearch:
         now = time.monotonic()
         if now - self._last_call < _MIN_INTERVAL_SECONDS:
             raise ProviderError(
-                f"{self.name}: throttled (min interval {_MIN_INTERVAL_SECONDS:.0f}s)"
+                f"{self.name}: throttled (min interval {_MIN_INTERVAL_SECONDS:.0f}s)",
+                reason=failure_reason.RATE_LIMIT,
             )
         self._last_call = now
 

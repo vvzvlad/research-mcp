@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import httpx
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import ProviderConfig, ProviderError
 from src.providers.registry import register
@@ -43,5 +44,8 @@ class Crawl4aiRead:
             raise ProviderError(f"{self.name}: invalid JSON response") from exc
         markdown = data.get("markdown")
         if not isinstance(markdown, str) or not markdown.strip():
-            raise ProviderError(f"{self.name}: empty markdown (bot protection?)")
+            raise ProviderError(
+                f"{self.name}: empty markdown (bot protection?)",
+                reason=failure_reason.BOT_PROTECTION,
+            )
         return markdown.strip()

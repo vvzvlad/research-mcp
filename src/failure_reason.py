@@ -1,27 +1,27 @@
 """Failure taxonomy: turn an exception into one short, model-facing category.
 
 Pure and I/O-free (like ``src/formatting.py``): the only input is an exception —
-its type, its message, and the causes chained behind it — and the only output is
-one of the constants below. The pipeline tags every provider failure with one,
-so the status lines can say *why* a page did not open instead of dumping raw
-exception text at the model.
+its ``reason``, its type, and the causes chained behind it — and the only output
+is one of the constants below. The pipeline tags every provider failure with
+one, so the status lines can say *why* a page did not open instead of dumping
+raw exception text at the model.
 
-Two passes, in this order:
+The category of our own failures is set where the error is raised, never
+guessed from its message. Two steps, in this order:
 
-1. The exception chain (``__cause__`` / ``__context__``, bounded like
+1. A ``ProviderError`` whose raise site set ``reason`` (``src/providers/_http.py``
+   for the HTTP status of a provider's own API, each provider for what it
+   recognised in an answer) — that reason is the answer.
+2. Otherwise the exception chain (``__cause__`` / ``__context__``, bounded like
    ``_is_tls_verify_error`` in ``src/pipeline.py``), which carries the real
-   transport-level cause: timeout / TLS / DNS / other network.
-2. Tolerant matching on OUR OWN ``ProviderError`` wording, built in
-   ``src/providers/_http.py`` and the providers. Deliberately loose — a
-   case-insensitive substring, or an ``HTTP <code>`` anywhere in the text — so a
-   reworded provider message still lands in the right bucket.
+   transport-level cause as third-party httpx / ssl / socket exceptions:
+   timeout / TLS / DNS / other network. Nothing there → ``other``.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-import re
 import socket
 import ssl
 
@@ -47,11 +47,6 @@ OTHER = "other"
 # httpx's wrapping, cheap, and immune to a self-referencing chain.
 _MAX_CHAIN = 6
 
-# "HTTP 429", "HTTP429", "http 402" — the code may sit anywhere in the message.
-_HTTP_STATUS = re.compile(r"http\s*(\d{3})", re.IGNORECASE)
-# The providers' wording for "the site answered that the page does not exist".
-_TARGET_GONE = re.compile(r"target page returned http\s*(404|410)", re.IGNORECASE)
-
 # What a failed name resolution says when it is not a socket.gaierror instance
 # (e.g. it was already flattened into a message).
 _DNS_TEXT = ("name or service not known", "nodename nor servname")
@@ -73,6 +68,13 @@ def _chain(exc: BaseException) -> list[BaseException]:
 
 def classify(exc: BaseException) -> str:
     """Return the failure category of ``exc`` — one of the constants above."""
+    # Imported here, not at module level: src.providers imports every provider,
+    # and the providers import this module.
+    from src.providers.base import ProviderError
+
+    if isinstance(exc, ProviderError) and exc.reason is not None:
+        return exc.reason
+
     chain = _chain(exc)
     texts = [str(item) for item in chain]
 
@@ -90,47 +92,21 @@ def classify(exc: BaseException) -> str:
     if any(isinstance(item, httpx.TransportError) for item in chain):
         return NETWORK
 
-    return _from_text(" | ".join(texts))
+    return OTHER
 
 
-def _from_text(text: str) -> str:
-    """Match our own ProviderError wording; ``other`` when nothing fits."""
-    lowered = text.lower()
-    codes = set(_HTTP_STATUS.findall(lowered))
-    # "throttled" is our OWN most frequent search failure: searxng and brave skip
-    # their turn when the local slot is taken. For the model that is the same
-    # advice as a remote 429 — wait, do not retry now.
-    if "rate limited" in lowered or "throttled" in lowered or "429" in codes:
-        return RATE_LIMIT
-    if "out of credits" in lowered or "402" in codes:
-        return NO_CREDITS
-    if codes & {"401", "403"}:
-        return ACCESS_DENIED
-    # Only wording about the TARGET page: a bare "client error (HTTP 404)" can
-    # be a provider's own API endpoint, and must not condemn the url.
-    # trafilatura / jina / firecrawl say "target page returned HTTP 404"; tavily
-    # says "404 page not found" (measured live).
-    if _TARGET_GONE.search(lowered) or "page not found" in lowered:
+def for_target_status(code: int) -> str:
+    """The category for "the TARGET site answered HTTP ``code``".
+
+    Only for the status of the page being read, never for a provider's own API
+    endpoint: a 404 there says nothing about the url.
+    """
+    if code in (404, 410):
         return NOT_FOUND
-    # Checked before `empty`: crawl4ai says "empty markdown (bot protection?)",
-    # and the bot-protection guess is the more useful of the two signals.
-    if "bot protection" in lowered:
-        return BOT_PROTECTION
-    # Every way a read provider says "there was nothing to take": trafilatura and
-    # the pipeline's thin check, crawl4ai, jina ("empty response") and tavily
-    # ("empty extraction"). They must agree, or dominant_reason splits the vote
-    # of a page that is simply empty everywhere and answers "прочее".
-    if any(
-        marker in lowered
-        for marker in (
-            "content too thin",
-            "no main content extracted",
-            "empty markdown",
-            "empty response",
-            "empty extraction",
-        )
-    ):
-        return EMPTY
+    if code in (401, 403):
+        return ACCESS_DENIED
+    if code == 429:
+        return RATE_LIMIT
     return OTHER
 
 

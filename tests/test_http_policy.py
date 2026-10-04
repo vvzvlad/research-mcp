@@ -17,6 +17,7 @@ import httpx
 import pytest
 import respx
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import ProviderError
 
@@ -44,6 +45,7 @@ async def test_serper_style_400_is_reported_as_out_of_credits():
     # The status stays in the message: an operator needs to see that this was a
     # 400, not a real 402, when checking the vendor's dashboard.
     assert "client error" not in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.NO_CREDITS
     # Billing state → no retry, exactly like 402/429.
     assert route.call_count == 1
 
@@ -60,6 +62,8 @@ async def test_octen_style_403_insufficient_balance_is_out_of_credits():
         await _call()
 
     assert "out of credits (HTTP 403)" in str(excinfo.value)
+    # A credit 403 is a billing state, not a refusal.
+    assert excinfo.value.reason == failure_reason.NO_CREDITS
     assert route.call_count == 1
 
 
@@ -118,6 +122,7 @@ async def test_plain_402_still_reports_out_of_credits():
         await _call()
 
     assert "out of credits (HTTP 402)" in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.NO_CREDITS
     assert route.call_count == 1
 
 
@@ -134,7 +139,30 @@ async def test_429_stays_rate_limited_even_when_the_body_mentions_credits():
         await _call()
 
     assert "rate limited (HTTP 429)" in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.RATE_LIMIT
     assert route.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (401, failure_reason.ACCESS_DENIED),
+        (403, failure_reason.ACCESS_DENIED),
+        # A provider's own endpoint answering 404 says nothing about the page:
+        # no category, the status alone travels on.
+        (404, None),
+    ],
+)
+@respx.mock
+async def test_plain_4xx_reason(status, expected):
+    respx.get(URL).mock(return_value=httpx.Response(status, text="nope"))
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _call()
+
+    assert f"client error (HTTP {status})" in str(excinfo.value)
+    assert excinfo.value.status == status
+    assert excinfo.value.reason == expected
 
 
 @respx.mock

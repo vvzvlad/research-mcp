@@ -24,6 +24,7 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import ProviderError
 
@@ -200,15 +201,18 @@ async def fetch_transcript(client: httpx.AsyncClient, video_id: str, retries: in
     if status != "OK":
         reason = playability.get("reason") or ""
         if "not a bot" in reason.lower():
-            # src.failure_reason.classify keys on the "bot protection" wording.
-            raise ProviderError(f"youtube: blocked by bot protection ({status}: {reason})")
+            raise ProviderError(
+                f"youtube: blocked by bot protection ({status}: {reason})",
+                reason=failure_reason.BOT_PROTECTION,
+            )
         raise ProviderError(f"youtube: video not playable ({status}: {reason})")
 
     renderer = (player.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {}
     tracks = renderer.get("captionTracks") or []
     if not tracks:
-        # "empty response" is the wording classify() maps to `empty`.
-        raise ProviderError("youtube: empty response (the video has no captions)")
+        raise ProviderError(
+            "youtube: empty response (the video has no captions)", reason=failure_reason.EMPTY
+        )
     track = _pick_track(player, tracks)
 
     # The srv3 format is a richer XML with per-word timing; without the
@@ -222,7 +226,10 @@ async def fetch_transcript(client: httpx.AsyncClient, video_id: str, retries: in
     )
     snippets = _parse_snippets(timedtext.content)
     if not snippets:
-        raise ProviderError("youtube: empty response (the caption track has no text)")
+        raise ProviderError(
+            "youtube: empty response (the caption track has no text)",
+            reason=failure_reason.EMPTY,
+        )
 
     details = player.get("videoDetails") or {}
     caption_name = "".join(run.get("text", "") for run in (track.get("name") or {}).get("runs", []))

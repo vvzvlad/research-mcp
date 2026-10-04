@@ -34,6 +34,7 @@ from urllib.parse import urlsplit
 import httpx
 from loguru import logger
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import ProviderConfig, ProviderError
 from src.providers.registry import register
@@ -93,20 +94,26 @@ _CAPTCHA_WARNING = "Warning: This page maybe requiring CAPTCHA"
 _GONE = {"404", "410"}
 
 
-def _refusal(text: str) -> tuple[str, bool] | None:
+def _refusal(text: str) -> tuple[str, str, bool] | None:
     """Why ``text`` is the site's refusal rather than the page, or None.
 
     Only the header block is looked at, so an article that merely quotes such a
-    line is not mistaken for a refusal. The bool is True when no escalation
+    line is not mistaken for a refusal. The second item is the refusal's
+    ``src.failure_reason`` category. The bool is True when no escalation
     step can cure it: a CAPTCHA wall (the residential exit does not break
     challenges, see ``_ESCALATIONS``) or a page that does not exist.
     """
     head = text.split("Markdown Content:", 1)[0]
     if _CAPTCHA_WARNING in head:
-        return "bot protection (CAPTCHA wall)", True
+        return "bot protection (CAPTCHA wall)", failure_reason.BOT_PROTECTION, True
     match = _TARGET_ERROR.search(head)
     if match:
-        return f"target page returned HTTP {match.group(1)}", match.group(1) in _GONE
+        code = match.group(1)
+        return (
+            f"target page returned HTTP {code}",
+            failure_reason.for_target_status(int(code)),
+            code in _GONE,
+        )
     return None
 
 
@@ -152,11 +159,12 @@ class JinaRead:
         )
         text = response.text.strip()
         reason = None
+        category = None
         refusal = _refusal(text)
         if refusal:
-            reason, final = refusal
+            reason, category, final = refusal
             if final:
-                raise ProviderError(f"{self.name}: {reason}")
+                raise ProviderError(f"{self.name}: {reason}", reason=category)
             # Any other refusal (403, 5xx, ...) is no text at all, however long
             # the refusal page: it climbs the ladder like an empty answer, where
             # the residential step may cure a block by IP reputation.
@@ -236,7 +244,7 @@ class JinaRead:
                 step_refusal = _refusal(retry_text)
                 if step_refusal:
                     # A refused step brought no text, however long its page.
-                    reason, final = step_refusal
+                    reason, category, final = step_refusal
                     retry_text = ""
                     # Nothing further down the ladder gets past a CAPTCHA, a
                     # missing page, or a refusal on the residential exit itself
@@ -248,5 +256,8 @@ class JinaRead:
                 if len(retry_text) > len(text):
                     text = retry_text
         if not text:
-            raise ProviderError(f"{self.name}: {reason or 'empty response'}")
+            raise ProviderError(
+                f"{self.name}: {reason or 'empty response'}",
+                reason=category or failure_reason.EMPTY,
+            )
         return text

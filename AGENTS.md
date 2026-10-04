@@ -69,7 +69,10 @@ a volume across restarts/image updates).
 - `src/failure_reason.py` — pure `classify(exc)` → one failure category
   (`timeout`/`rate-limit`/`no-credits`/`access-denied`/`bot-protection`/`not-found`/`tls`/
   `dns`/`network`/`empty`/`other`); the pipeline tags every provider failure with
-  one and `formatting` renders its Russian label.
+  one and `formatting` renders its Russian label. The raise site sets
+  `ProviderError.reason` (never inferred from the message text); `classify`
+  returns it, else the transport category found in the exception chain, else
+  `other`. `for_target_status(code)` maps the target page's HTTP status.
 - `src/server.py` — `build_server()` with the 4 `@mcp.tool` definitions (whose
   descriptions cross-reference each other: when to take this tool, when another).
 - `main.py` — thin entry point: stderr + persistent file sink, build server, run streamable-http.

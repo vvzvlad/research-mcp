@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import httpx
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import ProviderConfig, ProviderError
 from src.providers.registry import register
@@ -50,8 +51,11 @@ class FirecrawlRead:
         metadata = payload.get("metadata") if isinstance(payload, dict) else None
         status = metadata.get("statusCode") if isinstance(metadata, dict) else None
         if isinstance(status, int) and status >= 400:
-            raise ProviderError(f"{self.name}: target page returned HTTP {status}")
+            raise ProviderError(
+                f"{self.name}: target page returned HTTP {status}",
+                reason=failure_reason.for_target_status(status),
+            )
         markdown = payload.get("markdown") if isinstance(payload, dict) else None
         if not isinstance(markdown, str) or not markdown.strip():
-            raise ProviderError(f"{self.name}: empty markdown")
+            raise ProviderError(f"{self.name}: empty markdown", reason=failure_reason.EMPTY)
         return markdown.strip()

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import httpx
 
+from src import failure_reason
 from src.providers._http import request_with_retry
 from src.providers.base import ProviderConfig, ProviderError
 from src.providers.registry import register
@@ -74,5 +75,5 @@ class BrightDataUnlocker:
         # nothing usable, which is a failure for this provider.
         text = response.text.strip()
         if not text:
-            raise ProviderError(f"{self.name}: empty response")
+            raise ProviderError(f"{self.name}: empty response", reason=failure_reason.EMPTY)
         return text
