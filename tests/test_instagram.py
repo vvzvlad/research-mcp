@@ -23,7 +23,7 @@ from src.providers.instagram import (
     profile,
     shortcode,
 )
-from tests.conftest import _clear_provider_env
+from tests.conftest import _clear_provider_env, _jina_answer
 
 SHORTCODE = "DbIv3T_xMUn"
 # The shortcode read as url-safe base64 (A-Za-z0-9-_), i.e.
@@ -362,7 +362,7 @@ async def test_read_instagram_failure_falls_through(monkeypatch, settings):
         return_value=httpx.Response(200, text="<html><body><div id='app'></div></body></html>")
     )
     jina_md = "# Instagram\n\n" + ("Reel page content. " * 40)
-    respx.get(f"https://r.jina.ai/{POST_URL}").mock(return_value=httpx.Response(200, text=jina_md))
+    respx.get(f"https://r.jina.ai/{POST_URL}").mock(return_value=_jina_answer(jina_md))
 
     pipe = Pipeline.build(settings)
     try:
@@ -385,7 +385,7 @@ async def test_read_instagram_without_groq_key_skips_the_path(monkeypatch, setti
         return_value=httpx.Response(200, text="<html><body><div id='app'></div></body></html>")
     )
     jina_md = "# Instagram\n\n" + ("Reel page content. " * 40)
-    respx.get(f"https://r.jina.ai/{POST_URL}").mock(return_value=httpx.Response(200, text=jina_md))
+    respx.get(f"https://r.jina.ai/{POST_URL}").mock(return_value=_jina_answer(jina_md))
 
     pipe = Pipeline.build(settings)
     try:
@@ -679,9 +679,7 @@ async def test_read_profile_failure_falls_through(monkeypatch, settings):
         return_value=httpx.Response(200, text="<html><body><div id='app'></div></body></html>")
     )
     jina_md = "# Instagram\n\n" + ("Profile page content. " * 40)
-    respx.get(f"https://r.jina.ai/{PROFILE_URL}").mock(
-        return_value=httpx.Response(200, text=jina_md)
-    )
+    respx.get(f"https://r.jina.ai/{PROFILE_URL}").mock(return_value=_jina_answer(jina_md))
 
     pipe = Pipeline.build(settings)
     try:

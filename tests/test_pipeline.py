@@ -22,6 +22,7 @@ from src.rerank import RERANK_ENDPOINT
 from src.settings import Settings
 from tests.conftest import (
     _clear_provider_env,
+    _jina_answer,
     _mock_duckduckgo_no_results,
     _mock_duckduckgo_rate_limited,
 )
@@ -659,10 +660,8 @@ async def test_read_missing_page_fails_instead_of_serving_its_thin_error_page(
     url = "https://gone.test/page"
     respx.get(url).mock(return_value=httpx.Response(404, text="Not Found"))
     respx.get(f"https://r.jina.ai/{url}").mock(
-        return_value=httpx.Response(
-            200,
-            text="Title: 404\n\nWarning: Target URL returned error 404: Not Found\n\n"
-            "Markdown Content:\n# 404",
+        return_value=_jina_answer(
+            "# 404", http_status=404, warning="Target URL returned error 404: Not Found"
         )
     )
     respx.post("http://crawl4ai.test/md").mock(
@@ -688,9 +687,7 @@ async def test_read_thin_page_survives_a_404_from_a_provider_api(monkeypatch, se
     monkeypatch.setenv("CRAWL4AI_TOKEN", "tok")
     url = "https://short.test/page"
     respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
-    respx.get(f"https://r.jina.ai/{url}").mock(
-        return_value=httpx.Response(200, text="# A short note")
-    )
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer("# A short note"))
     respx.post("http://crawl4ai.test/md").mock(return_value=httpx.Response(404))
     pipe = Pipeline.build(settings)
     try:
@@ -807,9 +804,7 @@ async def test_read_pdf_probe_403_falls_through_to_provider(monkeypatch, setting
     url = "https://files.test/doc.pdf"
     respx.get(url).mock(return_value=httpx.Response(403))
     jina_md = "# PDF via jina\n\n" + ("Server-side fetched content. " * 50)
-    respx.get(f"https://r.jina.ai/{url}").mock(
-        return_value=httpx.Response(200, text=jina_md)
-    )
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(jina_md))
 
     pipe = Pipeline.build(settings)
     try:
@@ -837,9 +832,7 @@ async def test_read_pdf_200_nonpdf_body_falls_through_to_provider(monkeypatch, s
         )
     )
     jina_md = "# PDF via jina\n\n" + ("Server-side fetched content. " * 50)
-    respx.get(f"https://r.jina.ai/{url}").mock(
-        return_value=httpx.Response(200, text=jina_md)
-    )
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(jina_md))
 
     pipe = Pipeline.build(settings)
     try:
@@ -1349,7 +1342,7 @@ async def test_scanned_pdf_falls_through_to_the_read_chain(monkeypatch, settings
     url = "https://files.test/scan.pdf"
     respx.get(url).mock(return_value=httpx.Response(200, content=SAMPLE_PDF))
     jina_md = "# Scanned page, read by jina\n\n" + ("Recognised body text. " * 50)
-    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(200, text=jina_md))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(jina_md))
 
     pipe = Pipeline.build(settings)
     try:
