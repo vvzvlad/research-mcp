@@ -144,6 +144,13 @@ async def test_four_tools_registered(server):
     assert tools == {"web_search", "read_page", "read_pages", "search_and_read"}
 
 
+def test_server_instructions_advertise_youtube(server):
+    # With deferred tool schemas the client shows only the server instructions,
+    # so they are the one place that tells the model read_page opens YouTube.
+    assert "YouTube" in server.instructions
+    assert "read_page" in server.instructions
+
+
 async def test_search_tools_take_no_page_argument(server):
     # Paging was removed: a deeper result list is what num_results is for.
     by_name = {t.name: t for t in await server.list_tools()}
