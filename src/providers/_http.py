@@ -95,7 +95,9 @@ async def request_with_retry(
             # Out of credits / rate limited — do NOT retry, fail over instead.
             reason = "out of credits" if status == 402 else "rate limited"
             category = failure_reason.NO_CREDITS if status == 402 else failure_reason.RATE_LIMIT
-            raise ProviderError(f"{provider}: {reason} (HTTP {status})", reason=category)
+            raise ProviderError(
+                f"{provider}: {reason} (HTTP {status})", reason=category, exhausts_quota=True
+            )
         if 500 <= status < 600:
             last_error = f"HTTP {status}"
             if attempt + 1 < attempts:
@@ -112,6 +114,7 @@ async def request_with_retry(
                 raise ProviderError(
                     f"{provider}: out of credits (HTTP {status})",
                     reason=failure_reason.NO_CREDITS,
+                    exhausts_quota=True,
                 )
             raise ProviderError(
                 f"{provider}: client error (HTTP {status})",

@@ -4,6 +4,7 @@ All network I/O is mocked with respx. Pipelines are built via ``Pipeline.build``
 with monkeypatched provider ENV so we control exactly which instances are on.
 """
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,15 +12,17 @@ import httpx
 import pytest
 import respx
 
-from src.failure_reason import NOT_FOUND, dominant_reason
+from src.failure_reason import NO_CREDITS, NOT_FOUND, dominant_reason
 from src.formatting import format_search_results
 from src.pipeline import Pipeline, ReadFailed
+from src.pipeline_config import INSTANCES
 from src.providers.base import ProviderError
 from src.providers.duckduckgo import DDG_ENDPOINT
 from src.providers.instagram import GRAPHQL_ENDPOINT, GROQ_ENDPOINT
 from src.providers.pdf import NO_TEXT_LAYER_NOTICE
 from src.providers.trafilatura import extract_markdown
 from src.providers.youtube import PLAYER_ENDPOINT
+from src.quota import Quota
 from src.rerank import RERANK_ENDPOINT
 from src.settings import Settings
 from tests.conftest import (
@@ -1412,3 +1415,119 @@ async def test_scanned_pdf_keeps_the_notice_when_the_chain_finds_nothing(
     assert out.tried
     # Reported as a success, the way it was before the fall-through existed.
     assert any("ok=true" in line and "no text layer" in line for line in capture_logs)
+
+
+# -- persistent quotas ----------------------------------------------------
+
+
+def _with_quota(monkeypatch, name: str, quota: Quota) -> None:
+    """Give one instance a quota for this test; build() reads INSTANCES then."""
+    monkeypatch.setattr(
+        "src.pipeline.INSTANCES",
+        [replace(inst, quota=quota) if inst.name == name else inst for inst in INSTANCES],
+    )
+
+
+@respx.mock
+async def test_concurrent_searches_take_the_last_quota_slot_only_once(monkeypatch, settings):
+    # serper, not brave: brave's own 1.1s throttle would also stop the extra
+    # calls and pass this test for a reason that has nothing to do with quotas.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    _with_quota(monkeypatch, "serper", Quota(1, "monthly"))
+    _mock_duckduckgo_rate_limited()
+    route = respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(
+            200, json={"organic": [{"link": "https://s.test", "title": "S", "snippet": "s"}]}
+        )
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcomes = await asyncio.gather(*(pipe.search("q", 5, None) for _ in range(10)))
+    finally:
+        await pipe.aclose()
+
+    assert route.call_count == 1
+    assert sum("serper" in outcome.answered for outcome in outcomes) == 1
+    assert pipe._quota.used("serper") == 1
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(402),
+        httpx.Response(429),
+        httpx.Response(400, json={"message": "Not enough credits", "statusCode": 400}),
+    ],
+    ids=["402", "429", "credit-marker-4xx"],
+)
+@respx.mock
+async def test_search_instance_out_of_credits_is_not_called_again_this_period(
+    monkeypatch, settings, answer
+):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    _with_quota(monkeypatch, "serper", Quota(100, "monthly"))
+    _mock_duckduckgo_rate_limited()
+    route = respx.post("https://google.serper.dev/search").mock(return_value=answer)
+
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.search("q", 5, None)
+        second = await pipe.search("q", 5, None)
+    finally:
+        await pipe.aclose()
+
+    assert route.call_count == 1  # the second search never reached the network
+    assert pipe._quota.is_exhausted("serper")
+    assert second.failed_reasons[second.failed.index("serper")] == NO_CREDITS
+
+
+@respx.mock
+async def test_search_provider_error_refunds_the_slot(monkeypatch, settings):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    _with_quota(monkeypatch, "serper", Quota(100, "monthly"))
+    _mock_duckduckgo_rate_limited()
+    route = respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(500)
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search("q", 5, None)
+    finally:
+        await pipe.aclose()
+
+    assert route.called
+    assert "serper" in outcome.failed
+    assert pipe._quota.used("serper") == 0
+    assert not pipe._quota.is_exhausted("serper")
+
+
+@respx.mock
+async def test_read_instance_out_of_credits_is_skipped_without_a_request(monkeypatch, settings):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("TAVILY_1_API_KEY", "t1")
+    _with_quota(monkeypatch, "tavily-1", Quota(100, "monthly"))
+
+    url = "https://doc.test/page"
+    # trafilatura gets nothing out of the probe body and jina errors, so every
+    # read reaches tavily-1.
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(500))
+    route = respx.post("https://api.tavily.com/extract").mock(return_value=httpx.Response(402))
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ReadFailed):
+            await pipe.read(url)
+        with pytest.raises(ReadFailed) as second:
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert route.call_count == 1  # the second read skipped tavily-1 before the network
+    assert ("tavily-1", NO_CREDITS) in second.value.failures
+    assert "tavily-1: quota exhausted for this period" in str(second.value)

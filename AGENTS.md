@@ -2,9 +2,10 @@
 
 An MCP "facade" that hides a pyramid of search/read providers behind a single
 streamable-http MCP endpoint and exposes **4 clean tools** with good English help
-texts. No auth in the app: Traefik + basicAuth on the host handles it. No
-application state — the only thing persisted is a log file under `data/` (kept on
-a volume across restarts/image updates).
+texts. No auth in the app: Traefik + basicAuth on the host handles it. The only
+things persisted are a log file and the quota store (`data/quota.sqlite3`:
+per-instance quota usage and the cumulative billed counters), both under `data/`
+(kept on a volume across restarts/image updates).
 
 ## Plugin architecture (types + instances)
 - A **type** is an implementation class (`src/providers/<type>.py`), registered
@@ -80,7 +81,12 @@ a volume across restarts/image updates).
 - `src/server.py` — `build_server()` with the 4 `@mcp.tool` definitions (whose
   descriptions cross-reference each other: when to take this tool, when another).
 - `main.py` — thin entry point: stderr + persistent file sink, build server, run streamable-http.
-- `data/` — runtime state (persistent log file; gitignored, mounted as a volume).
+- `src/quota.py` — `Quota` / `QuotaStore`: persistent per-instance quotas
+  (SQLite, period key computed on the fly), atomic `reserve` before the network
+  call, `refund` on failure, `mark_exhausted` on the vendor's 402/429; also holds
+  the cumulative billed counters.
+- `data/` — runtime state (persistent log file and the quota store
+  `quota.sqlite3`; gitignored, mounted as a volume).
 - `tests/` — pytest (network mocked with respx).
 
 ## Logging
@@ -136,8 +142,9 @@ make run               # serve streamable-http on MCP_HOST:MCP_PORT, endpoint /m
   code, git, or `.env.example` (placeholders only); secrets live only in `.env` /
   prod `environment:`.
 - Provider secrets are NOT Settings fields — read by name in the loader.
-- The only runtime state is the log file under `data/` (golden rule: mutable
-  state lives in `data/`, which is gitignored and a docker volume).
+- The only runtime state is the log file and the quota store under `data/`
+  (golden rule: mutable state lives in `data/`, which is gitignored and a docker
+  volume).
 - All repeated actions go through `make` targets; Python runs from `.venv`.
 - Tests are required for new code; in CI `build` depends on `test`.
 - No `EXPOSE` in the Dockerfile — Traefik publishes via compose labels.
