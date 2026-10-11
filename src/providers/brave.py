@@ -1,6 +1,6 @@
 """Brave Search API provider (independent web index).
 
-API (verified live 2026-08-09): GET
+API: GET
 ``https://api.search.brave.com/res/v1/web/search`` with headers ``Accept:
 application/json``, ``Accept-Encoding: gzip`` and ``X-Subscription-Token``;
 query params ``q``, ``count``, ``country``, ``search_lang`` →
@@ -11,7 +11,7 @@ language, ...). The snippet lives in ``description`` here — NOT ``content`` as
 searxng, nor ``snippet`` as in serper. A response may omit ``web`` entirely (e.g.
 nothing found), which is a normal empty answer, not a failure.
 
-Free-plan quota, read off the response headers (verified 2026-08-09):
+Free-plan quota, read off the response headers:
 ``x-ratelimit-limit: 1, 2000`` / ``x-ratelimit-policy: 1;w=1, 2000;w=2678400`` —
 one request per second and 2000 per month. Hence the local throttle below.
 """
@@ -34,7 +34,7 @@ BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 BRAVE_COUNT_MAX = 20
 
 # Every value Brave's `search_lang` accepts, verbatim from the `Language` enum
-# of the official Web Search OpenAPI schema (52 codes, read 2026-08-09 from
+# of the official Web Search OpenAPI schema (52 codes, from
 # api-dashboard.search.brave.com/api-reference/web/search/get → `search_lang` →
 # `#/components/schemas/Language`). Anything outside this set is a 422 — note
 # how little of it is plain ISO 639-1: no bare `zh` or `pt`, and `en-gb` /
@@ -89,15 +89,10 @@ def _brave_lang(value: str) -> str | None:
 # Minimum spacing between two Brave queries from this process.
 #
 # The free plan allows exactly 1 request per second (``x-ratelimit-policy:
-# 1;w=1``, verified 2026-08-09). Our median gap between searches is 2s, but
-# bursts of several searches inside one second do happen, so we pace slightly
-# above one second to stay clear of the window boundary.
+# 1;w=1``); pacing slightly above that stays clear of the window boundary.
 #
-# The reaction to a taken slot is a SKIP, not a wait — deliberately, even though
-# waiting here would cost 1.1s versus searxng's 45s. Pipeline.search() awaits
-# every search provider, so even a one-second wait stretches EVERY web_search by
-# that much; and parallel searches from the LLM would just queue up against
-# Brave's own per-second limit anyway, so the wait buys nothing.
+# A taken slot is a SKIP, not a wait: Pipeline.search() awaits every search
+# provider, so even a one-second wait would stretch every web_search.
 _MIN_INTERVAL_SECONDS = 1.1
 
 
@@ -144,11 +139,9 @@ class BraveSearch:
         # The check and the assignment are adjacent with no await between them, so
         # under asyncio they are atomic — no lock is needed here, do not add one.
         #
-        # _last_call is stamped BEFORE the request, so an attempt that fails
-        # spends the slot too (including failures Brave never saw). Deliberate
-        # fail-closed choice: from here we cannot tell how far a failed request
-        # got, and one wasted slot is cheaper than tripping the limit. Do NOT
-        # "fix" this by moving the assignment below the request.
+        # _last_call is stamped BEFORE the request, so a failed attempt spends
+        # the slot too: we cannot tell how far it got, and one wasted slot is
+        # cheaper than tripping the limit. Do not move it below the request.
         now = time.monotonic()
         if now - self._last_call < _MIN_INTERVAL_SECONDS:
             raise ProviderError(

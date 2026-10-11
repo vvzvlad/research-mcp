@@ -1,6 +1,6 @@
 """Shared pytest fixtures.
 
-Settings now has only defaulted fields, so importing it needs no ENV. Provider
+Settings has only defaulted fields, so importing it needs no ENV. Provider
 instances are selected by the ENV var NAMES in pipeline_config; tests set those
 vars explicitly (usually via monkeypatch) to choose which instances are enabled.
 """
@@ -106,7 +106,7 @@ def _jina_answer(
 ) -> httpx.Response:
     """A Jina Reader answer in the JSON envelope ``Accept: application/json`` gets.
 
-    The shape measured live 2026-10-04: HTTP 200 whatever the site said, the
+    The shape measured live: HTTP 200 whatever the site said, the
     Markdown in ``data.content``, the target site's status in
     ``data.httpStatus``, and ``data.warning`` only when jina has one.
     """

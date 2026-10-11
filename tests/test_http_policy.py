@@ -2,9 +2,8 @@
 
 Serper answers an empty account with HTTP 400
 ``{"message":"Not enough credits","statusCode":400}`` rather than the
-conventional 402 (verified live 2026-09-18: ``GET /account`` returns
-``balance: 0`` while every search returns that 400). For months this surfaced as
-``client error (HTTP 400)`` — an unpaid account that reads like a broken API.
+conventional 402. Without the classification it reads as
+``client error (HTTP 400)`` — an unpaid account that looks like a broken API.
 
 These tests pin the classification and, just as importantly, that it stays a
 single non-retried attempt: a billing state must fail over immediately, exactly

@@ -613,13 +613,13 @@ async def test_read_url_no_specific_reader_accepts_never_reaches_them(monkeypatc
     assert groq.call_count == 0
 
 
-# -- lazy self-healing client (regression: "client has been closed") -------
+# -- lazy self-healing client ("client has been closed") -------
 
 
 @respx.mock
 async def test_read_recreates_client_after_aclose(monkeypatch, settings):
-    # Regression for the prod bug: a premature aclose() (e.g. a streamable-http
-    # lifespan shutdown) must NOT poison later requests with
+    # A premature aclose() (e.g. a streamable-http lifespan shutdown) must NOT
+    # poison later requests with
     # "Cannot send a request, as the client has been closed.". We do NOT inject a
     # client here so the pipeline owns it and we exercise lazy recreation. respx
     # patches the httpx transport globally, so the recreated real client is also
@@ -849,7 +849,7 @@ async def test_read_pdf_probe_403_falls_through_to_provider(monkeypatch, setting
 
 @respx.mock
 async def test_read_pdf_200_nonpdf_body_falls_through_to_provider(monkeypatch, settings):
-    # Regression: a .pdf url that returns HTTP 200 but whose body is NOT a
+    # A .pdf url that returns HTTP 200 but whose body is NOT a
     # parseable PDF (antibot/HTML interstitial) must NOT hard-fail. The probe
     # catches the parse error and defers to the read chain, where jina fetches
     # server-side and retrieves the real content.
@@ -886,7 +886,7 @@ async def test_read_pdf_200_nonpdf_body_no_provider_raises_normal_failure(
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
 
     url = "https://files.test/doc.pdf"
-    # Probe GET returns the 200 non-PDF interstitial (the regression trigger);
+    # Probe GET returns the 200 non-PDF interstitial;
     # trafilatura's re-fetch is then blocked (antibot), so no provider yields
     # content and the read fails through the normal path.
     respx.get(url).mock(
@@ -1335,10 +1335,8 @@ async def test_search_and_read_emits_a_summary_log(monkeypatch, settings, captur
 
 
 def test_extract_markdown_uses_precision(monkeypatch):
-    # Deterministic regression guard for fix C: assert the exact kwargs handed to
-    # trafilatura.extract. A content-based assertion would be tautological (it
-    # passes under both favor_recall and favor_precision); spying on the call
-    # locks the contract so a revert to favor_recall fails the test.
+    # Assert the exact kwargs handed to trafilatura.extract: a content-based
+    # assertion would pass under both favor_recall and favor_precision.
     captured_kwargs: dict[str, object] = {}
 
     def spy(html, **kwargs):
@@ -1362,9 +1360,8 @@ def test_extract_markdown_uses_precision(monkeypatch):
 @respx.mock
 async def test_scanned_pdf_falls_through_to_the_read_chain(monkeypatch, settings):
     # A PDF with no text layer is a scan. pypdf parses it but has no text to
-    # give, and this branch used to return that notice as a SUCCESS — so a scan
-    # never entered the read chain and never reached jina's OCR tier, which
-    # exists for exactly this case. It must fall through instead.
+    # give; the read must fall through to the chain (and jina's OCR tier)
+    # instead of returning pypdf's notice as a success.
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
 

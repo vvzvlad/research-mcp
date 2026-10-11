@@ -59,13 +59,10 @@ _DDG_REGIONS = {
 
 # Minimum spacing between two DuckDuckGo queries from this process.
 #
-# The endpoint publishes no quota, so this number is NOT ours to guess: it is
-# the one measured against this very upstream from this very egress IP, and it
-# lives in searxng.py (prod, 2026-08-09 — DuckDuckGo cuts us off after ~4
-# back-to-back queries and holds the block for 7-8 minutes; at a 45s gap 8 of 8
-# came back whole). A faster pace here would not only cost us this instance: our
-# SearXNG reaches DuckDuckGo over the same address, and DuckDuckGo is the only
-# engine it still has, so a block taken here takes the main search down with it.
+# The endpoint publishes no quota; this is the gap measured from this egress IP
+# (see searxng.py): DuckDuckGo blocks after ~4 back-to-back queries for 7-8
+# minutes. SearXNG reaches DuckDuckGo over the same address, so a block taken
+# here takes the main search down with it.
 _MIN_INTERVAL_SECONDS = 45.0
 
 
@@ -160,12 +157,9 @@ class DuckDuckGoSearch:
         # The check and the assignment are adjacent with no await between them, so
         # under asyncio they are atomic — no lock is needed here, do not add one.
         #
-        # _last_call is stamped BEFORE the request, so an attempt that fails
-        # spends the slot too — even failures DuckDuckGo never saw (our own
-        # timeout, a dead link). That is a deliberate fail-closed choice: from
-        # here we cannot tell how far a failed request got, and pacing one wasted
-        # slot is far cheaper than earning a block. Do NOT "fix" this by moving
-        # the assignment below the request.
+        # _last_call is stamped BEFORE the request, so a failed attempt spends
+        # the slot too: we cannot tell how far it got, and one wasted slot is
+        # cheaper than earning a block. Do not move it below the request.
         now = time.monotonic()
         if now - self._last_call < _MIN_INTERVAL_SECONDS:
             raise ProviderError(

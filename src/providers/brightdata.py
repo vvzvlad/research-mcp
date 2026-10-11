@@ -1,6 +1,6 @@
 """Bright Data Web Unlocker read provider.
 
-API (verified 2026-09-18 against
+API (per
 https://docs.brightdata.com/api-reference/rest-api/unlocker/unlock-website and
 https://docs.brightdata.com/scraping-automation/web-unlocker/send-your-first-request):
 POST ``https://api.brightdata.com/request`` with header

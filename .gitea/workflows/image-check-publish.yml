@@ -10,14 +10,9 @@ on:
 permissions:
   contents: read   # checkout
 
-# Two pushes to main in a row must not race: the runs are independent and the
-# older one may finish last, leaving its :latest on the registry — watchtower
-# polls every 2 seconds and would ship the previous commit to prod.
-# The group alone already fixes that: runs are serialised, so the newest commit's
-# :latest is written last. Cancelling is deliberately OFF — it would kill the
-# older run together with its :<sha> image, and on two quick pushes the
-# intermediate commit would never be built, leaving holes in the tag history
-# exactly where a rollback is most likely to be needed.
+# Serialise runs per branch so the newest commit's :latest is written last (prod
+# auto-updates from it). No cancelling: that would kill the older run with its
+# :<sha> image and leave holes in the rollback tags.
 concurrency:
   group: image-${{ github.ref }}
   cancel-in-progress: false
@@ -135,11 +130,8 @@ jobs:
       # otherwise pile up and grow the disk forever. This step removes ONLY the
       # tags this run created — no `docker system prune`, which would also wipe
       # images of other repos sharing the same daemon.
-      # It does NOT reclaim everything: `docker rmi <tag>` never touches the
-      # BuildKit cache (that lives in a separate builder store and is only freed
-      # by `docker builder prune`), and `--pull` above leaves the previous
-      # python:3.11-slim untagged as a dangling image whenever upstream updates.
-      # Both need a separate periodic cleanup on the runner host.
+      # The BuildKit cache and dangling base images left by `--pull` are not
+      # reclaimed here; they need a separate periodic cleanup on the runner host.
       # `always()` so the cleanup runs even when the push above fails.
       if: always()
       env:

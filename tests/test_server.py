@@ -152,7 +152,7 @@ def test_server_instructions_advertise_youtube(server):
 
 
 async def test_search_tools_take_no_page_argument(server):
-    # Paging was removed: a deeper result list is what num_results is for.
+    # No paging: a deeper result list is what num_results is for.
     by_name = {t.name: t for t in await server.list_tools()}
     for name in ("web_search", "search_and_read"):
         assert "page" not in by_name[name].inputSchema["properties"], name

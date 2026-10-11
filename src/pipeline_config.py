@@ -66,8 +66,8 @@ INSTANCES: list[Instance] = [
     # deploy a SearXNG". It scrapes the no-JS SERP, so it is free but fragile:
     # it sits behind searxng in the pipeline, never in front of it.
     Instance("duckduckgo", "duckduckgo"),
-    # Brave reaches its API fine from this host directly (verified 2026-08-09);
-    # the proxy var exists only for symmetry with the other external instances.
+    # Brave reaches its API directly from this host; the proxy var exists only
+    # for symmetry with the other external instances.
     # The free plan grants 2000 queries a month (see src/providers/brave.py).
     Instance(
         "brave",
@@ -84,19 +84,12 @@ INSTANCES: list[Instance] = [
     # Tavily and Firecrawl sell search and extract off ONE key, so these two
     # need no new secret and light up the moment the reader key is present.
     #
-    # They are NOT free, though: the key has ONE monthly pool, shared by both
-    # products. Measured on our own Tavily key 2026-09-18: plan_usage 12 =
-    # search 4 + extract 8, against plan_limit 1000. Search runs on every
-    # web_search while the tavily/firecrawl READERS sit 4th and 6th in the read
-    # chain and win ~1% of reads (19-27 calls a month), so search will be what
-    # empties the pool — and when it does, those readers start failing too and
-    # drop out of the chain. Firecrawl says so with a 402 (seen in our own logs);
-    # what status Tavily uses is NOT verified — its docs do not publish one, so
-    # do not grep for a specific code there, and note that _CREDIT_MARKERS may
-    # or may not match its wording. That trade is deliberate: the readers we
-    # lose are worth far less than the search we gain, and the chain has five
-    # other readers. But it is a trade, not a free lunch, and it cannot be
-    # turned off per-product — pulling the key disables the reader as well.
+    # They are NOT free: the key has ONE monthly pool shared by both products.
+    # Search runs on every web_search while these readers win few reads, so
+    # search is what empties the pool, and then the readers fail too. Firecrawl
+    # signals it with a 402; Tavily's status is undocumented, and _CREDIT_MARKERS
+    # may not match its wording. It cannot be turned off per product — pulling
+    # the key disables the reader as well.
     Instance(
         "tavily-search", "tavily_search", api_key_env="TAVILY_1_API_KEY", proxy_env="TAVILY_1_PROXY"
     ),
@@ -175,22 +168,16 @@ INSTANCES: list[Instance] = [
 # source. Cost scales with how many instances are ENABLED, not with position —
 # so enabling all of them means paying all of them on every single query.
 #
-# Order: proven and free first (searxng self-hosted, then keyless duckduckgo,
-# then brave's 2000/month), then tavily-search and firecrawl-search — no new
-# secret, but NOT free: they spend the same monthly pool as their own readers,
-# see the instance comment above. Then the proven paid workhorse jina-search at
-# ~$0.0005/query, then the vendors we have no key for yet, cheapest first
-# (xmlriver ~$0.0003 on the Yandex index, parallel and octen at $1/1k, linkup
-# and youcom at $5/1k), then serper, then exa at $7/1k.
+# Order: free first (searxng self-hosted, keyless duckduckgo, brave's
+# 2000/month), then tavily-search and firecrawl-search (they spend their
+# readers' monthly pool, see above), then jina-search (~$0.0005/query), then
+# the rest cheapest first (xmlriver ~$0.0003 on the Yandex index, parallel and
+# octen at $1/1k, linkup and youcom at $5/1k), then serper, then exa at $7/1k.
 #
-# duckduckgo sits DIRECTLY AFTER searxng, and that position is load-bearing:
-# it needs no key, so it is on in every deployment, but it is a scrape of a
-# public SERP rather than an API. Behind searxng, dedup (which prefers the
-# earlier source) keeps SearXNG's copy of every shared url, and duckduckgo adds
-# only what nobody ahead of it returned. Note what this does NOT promise: with
-# the reranker on (the default once JINA_API_KEY is set) the merged list is
-# reordered by relevance across ALL sources before the trim, so the final order
-# — and which hits survive num_results — can change.
+# duckduckgo sits directly after searxng: it is a SERP scrape that is on in
+# every deployment, so behind searxng it only adds urls nobody ahead returned.
+# With the reranker on (JINA_API_KEY set) the merged list is reordered by
+# relevance before the trim, so position does not fix the final order.
 SEARCH_PIPELINE: list[str] = [
     "searxng",
     "duckduckgo",

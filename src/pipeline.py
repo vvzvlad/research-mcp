@@ -722,30 +722,16 @@ class Pipeline:
         # defers to the read chain below (jina/tavily/firecrawl fetch server-side).
         #
         # A PDF with a text layer is done there. A PDF WITHOUT one is a scan:
-        # pypdf has nothing to give and used to return the notice as a success,
-        # which meant a scan never reached the read chain at all. Fall through
-        # instead, keeping the notice as the last resort if the chain also comes
-        # back empty (the behaviour callers had before).
+        # fall through to the read chain, keeping pypdf's notice as the last
+        # resort if the chain also comes back empty.
         #
-        # What the chain can actually do with a scan, precisely: jina, tavily,
-        # firecrawl and brightdata fetch the file server-side with their own
-        # parsers and may find text pypdf could not. crawl4ai also fetches on
-        # its own side, but it is a headless browser with no OCR, so on a scan
-        # it is as useless as trafilatura. And trafilatura, which runs FIRST, is
-        # an HTML-only extractor that always fails here — worse, probe_html is
-        # None on this branch, so it cannot reuse the probe body and re-downloads
-        # the whole file to our host before failing. That download is part of
-        # the price of this fall-through.
-        #
-        # jina's OCR tier is the strongest chance, but it has TWO gates: the url
-        # PATH must end in .pdf (_is_pdf_url in providers/jina.py) and jina must
-        # be running keyed (the whole ladder sits behind `if api_key`). So a
-        # keyless deployment never reaches OCR at all, and neither does a scan
-        # served from something like /download?id=123 — this branch also fires
-        # for PDFs recognised by Content-Type or %PDF magic alone. How often
-        # that shape of url occurs we have not counted. Widening the gate would
-        # mean passing the probe's verdict down into the provider, which the
-        # ReadProvider protocol has no room for today.
+        # On a scan, jina, tavily, firecrawl and brightdata fetch the file with
+        # their own parsers and may find text; crawl4ai (no OCR) and trafilatura
+        # (HTML-only, and with probe_html None it re-downloads the file) fail.
+        # jina's OCR tier needs both a url PATH ending in .pdf (_is_pdf_url in
+        # providers/jina.py) and an api key, so a keyless deployment or a scan
+        # recognised only by Content-Type / %PDF magic never reaches it; the
+        # ReadProvider protocol has no way to pass the probe's verdict down.
         probed = False
         probe_html: str | None = None
         pdf_notice: str | None = None
@@ -912,7 +898,7 @@ class Pipeline:
 
         A TLS certificate-verification failure triggers ONE retry without
         verification (some legitimate hosts ship a broken chain). The probe never
-        hard-fails anymore — a failed fetch always defers to the provider chain,
+        hard-fails — a failed fetch always defers to the provider chain,
         and a body that looks like a PDF but fails to parse ALSO defers to the
         provider chain instead of raising.
         """

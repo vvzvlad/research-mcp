@@ -1,6 +1,6 @@
 """Brave search provider: response parsing, empty answers, throttle.
 
-The payload mirrors the shape captured from a live call on 2026-08-09 (top-level
+The payload mirrors the shape captured from a live call (top-level
 ``type``/``query``/``mixed``/``web``; the snippet lives in
 ``web.results[].description``).
 

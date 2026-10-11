@@ -1,10 +1,10 @@
 """Parallel Search provider: response parsing, request body, failures.
 
-The payload mirrors the ``V1SearchResponse`` shape documented on 2026-09-18 at
+The payload mirrors the ``V1SearchResponse`` shape documented at
 https://docs.parallel.ai/api-reference/search-api/search (``search_id`` /
 ``results`` / ``warnings`` / ``usage`` / ``session_id``; the snippet lives in
 ``results[].excerpts`` as a LIST of strings). Network I/O is mocked with respx —
-no live call is ever made, we hold no Parallel key.
+no live call is ever made.
 """
 
 from __future__ import annotations

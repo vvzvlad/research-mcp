@@ -1,6 +1,6 @@
 """Tavily Extract read provider.
 
-API (verified 2026-06): POST ``https://api.tavily.com/extract`` with header
+API: POST ``https://api.tavily.com/extract`` with header
 ``Authorization: Bearer {key}`` and body
 ``{"urls": [url], "extract_depth": "advanced", "format": "markdown"}`` →
 ``{"results": [{"url", "raw_content"}], "failed_results": [{"url", "error"}]}``.

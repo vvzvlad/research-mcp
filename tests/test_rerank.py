@@ -1,6 +1,6 @@
 """Jina reranker: index-based reordering, top_n slice, malformed responses.
 
-The response shape mirrors the RerankerV3Request contract read 2026-08-18 from
+The response shape mirrors the RerankerV3Request contract from
 https://api.jina.ai/openapi.json: ``results`` is a list of ``{"index",
 "relevance_score"}`` sorted by relevance descending, where ``index`` points
 into the ORIGINAL documents list. Network I/O is mocked with respx.

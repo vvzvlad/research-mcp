@@ -1,6 +1,6 @@
 """Jina Search (s.jina.ai) provider: envelope parsing and request shape.
 
-The payload mirrors the reader-style envelope documented 2026-08-18:
+The payload mirrors the documented reader-style envelope:
 ``{"code": 200, "status": ..., "data": [{"title", "url", "description"}]}``.
 Network I/O is mocked with respx, like the rest of the suite.
 """

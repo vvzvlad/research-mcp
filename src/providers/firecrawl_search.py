@@ -1,7 +1,6 @@
 """Firecrawl v2 search provider.
 
-API (contract read 2026-09-18 from docs.firecrawl.dev/features/search and its
-Search API reference): POST ``https://api.firecrawl.dev/v2/search`` with headers
+API (per docs.firecrawl.dev/features/search and its Search API reference): POST ``https://api.firecrawl.dev/v2/search`` with headers
 ``Authorization: Bearer {key}`` and ``Content-Type: application/json``, JSON body
 — ``query`` (required, at most 500 chars), ``limit`` (default 10, documented
 range 1..100, applied PER source), ``sources`` (defaults to ``["web"]``; the
