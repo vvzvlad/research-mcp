@@ -121,6 +121,18 @@ def _jina_answer(
     return httpx.Response(200, json={"code": 200, "status": 20000, "data": data, "meta": {}})
 
 
+@pytest.fixture(autouse=True)
+def _isolated_quota_db(monkeypatch, tmp_path):
+    """Give every test its own quota store file instead of the repo's data/.
+
+    ``Pipeline.build`` opens ``settings.quota_db``, which persists across runs:
+    without this, tests would write into data/ and the cumulative counters they
+    assert on would depend on test order. Settings reads os.environ even with
+    ``_env_file=None``, and an autouse fixture runs before ``settings``.
+    """
+    monkeypatch.setenv("QUOTA_DB", str(tmp_path / "quota.sqlite3"))
+
+
 @pytest.fixture
 def capture_logs():
     """Capture loguru messages into a list of formatted strings for the test.

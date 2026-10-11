@@ -30,14 +30,24 @@ class ProviderError(Exception):
     ``reason`` is the failure category (a ``src.failure_reason`` constant), set
     by the raise site, which is the only place that knows it. ``None`` means
     "let ``classify()`` look at the exception chain, else ``other``".
+    ``exhausts_quota`` is set only by ``request_with_retry``, on any 402/429 (or
+    a 4xx whose body reports an exhausted balance) it receives - for a provider
+    that calls its own API that is the vendor's balance; the pipeline acts on it
+    only for instances with a declared quota, blocking that quota for the rest
+    of the period.
     """
 
     def __init__(
-        self, message: str, status: int | None = None, reason: str | None = None
+        self,
+        message: str,
+        status: int | None = None,
+        reason: str | None = None,
+        exhausts_quota: bool = False,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.reason = reason
+        self.exhausts_quota = exhausts_quota
 
 
 @dataclass(slots=True)

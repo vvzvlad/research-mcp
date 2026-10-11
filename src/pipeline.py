@@ -69,6 +69,7 @@ from src.providers.base import (
 from src.providers.pdf import NO_TEXT_LAYER_NOTICE, extract_pdf_text, looks_like_pdf
 from src.providers.registry import REGISTRY
 from src.providers.trafilatura import TrafilaturaRead, extract_markdown
+from src.quota import QuotaStore
 from src.rerank import JinaReranker
 from src.settings import Settings
 
@@ -338,6 +339,7 @@ class Pipeline:
         client: httpx.AsyncClient | None = None,
         paid_names: set[str] | frozenset[str] | None = None,
         reranker: JinaReranker | None = None,
+        quota: QuotaStore | None = None,
     ) -> None:
         self._settings = settings
         self._search = search_instances
@@ -348,12 +350,14 @@ class Pipeline:
         self._reranker = reranker
         # Names of the enabled instances whose TYPE bills per successful request.
         self._paid: frozenset[str] = frozenset(paid_names or ())
-        # Cumulative BILLED counters for this process: paid calls and total
-        # calls. They are in-memory and reset on restart; the per-request
-        # `paid_calls=` field in each log line lets the full history be
-        # re-aggregated from the log file across restarts.
-        self._cum_paid = 0
-        self._cum_calls = 0
+        # Per-instance quotas and the cumulative billed counters (src/quota.py).
+        # build() passes the persistent store; without one both live in memory.
+        self._quota = quota or QuotaStore(":memory:", {})
+        # Cumulative BILLED counters: paid calls and total calls. They are kept
+        # in the quota store and survive a restart — this loads the saved
+        # totals. The per-request `paid_calls=` field in each log line still
+        # lets the full history be re-aggregated from the log file.
+        self._cum_paid, self._cum_calls = self._quota.add_billed(0, 0)
         # Do NOT create clients eagerly: build() runs before the event loop
         # starts, and an httpx.AsyncClient created here would be bound to (and
         # later closed by) the wrong loop/lifespan. The manager creates them
@@ -456,6 +460,10 @@ class Pipeline:
             paid_names.add(reranker.name)
             logger.info("Search rerank enabled (jina-reranker-v3.5)")
 
+        # Only the enabled instances' quotas: the store treats every other name
+        # as unlimited.
+        quotas = {i.name: i.quota for i in INSTANCES if i.quota is not None and i.name in built}
+
         return cls(  # type: ignore[arg-type]
             settings,
             search_instances,
@@ -463,10 +471,15 @@ class Pipeline:
             client=client,
             paid_names=paid_names,
             reranker=reranker,
+            quota=QuotaStore(settings.quota_db, quotas),
         )
 
     async def aclose(self) -> None:
-        """Close every per-proxy httpx client."""
+        """Close every per-proxy httpx client.
+
+        The quota store stays open: the server lifespan that calls this ends
+        with every MCP session, and the pipeline keeps serving the next one.
+        """
         await self._clients.aclose()
 
     @property
@@ -482,6 +495,7 @@ class Pipeline:
     def _account(self, billed: list[str]) -> tuple[int, float]:
         """Fold one request's billed upstream calls into the cumulative counters.
 
+        The counters live in the quota store, so they survive a restart.
         `billed` = names of provider instances whose upstream call returned data
         (a billed 200; thin read results count, raised/errored calls do not). A
         search instance that answered with ZERO hits is NOT billed either
@@ -495,8 +509,7 @@ class Pipeline:
         synchronously (no await), so it is safe under asyncio.gather concurrency.
         """
         paid = sum(1 for name in billed if name in self._paid)
-        self._cum_paid += paid
-        self._cum_calls += len(billed)
+        self._cum_paid, self._cum_calls = self._quota.add_billed(paid, len(billed))
         pct = (100.0 * self._cum_paid / self._cum_calls) if self._cum_calls else 0.0
         return paid, pct
 
@@ -524,13 +537,30 @@ class Pipeline:
             # and reason is its failure category (empty string when it worked).
             # Each provider uses the client bound to ITS proxy (None = direct).
             client = self._clients.client_for(provider.proxy)
+            # Book the call against the instance's quota BEFORE the network:
+            # the instances run concurrently, so only the reservation itself
+            # keeps them under the limit. A spent quota skips the instance
+            # without a request and reports it like the vendor's own 402.
+            slot = self._quota.reserve(provider.name)
+            if slot is None:
+                logger.info("search '{}' skipped: quota exhausted", provider.name)
+                return provider.name, None, failure_reason.NO_CREDITS
             try:
+                # Success keeps the slot, an empty answer included: the vendor
+                # counted the request either way.
                 hits = await provider.search(client, query, num_results, language)
                 return provider.name, hits, ""
             except ProviderError as exc:
+                # The vendor's own 402/429 spends the rest of the period; any
+                # other failure gives the slot back.
+                if exc.exhausts_quota:
+                    self._quota.mark_exhausted(slot)
+                else:
+                    self._quota.refund(slot)
                 logger.info("search '{}' failed: {}", provider.name, exc)
                 return provider.name, None, failure_reason.classify(exc)
             except Exception as exc:  # noqa: BLE001 — never break the merge
+                self._quota.refund(slot)
                 logger.warning("search '{}' crashed: {}", provider.name, exc)
                 return provider.name, None, failure_reason.classify(exc)
 
@@ -745,9 +775,21 @@ class Pipeline:
                         )
                     pdf_notice = pdf_text
             tried.append(provider.name)
+            # Same quota bookkeeping as in search: reserve before the network,
+            # skip a spent instance, refund a failure that is not the vendor's
+            # own 402/429. A thin answer keeps its slot — it was billed.
+            slot = self._quota.reserve(provider.name)
+            if slot is None:
+                errors.append(f"{provider.name}: quota exhausted for this period")
+                failures.append((provider.name, failure_reason.NO_CREDITS))
+                continue
             try:
                 content = await self._read_one(provider, url, probe_html)
             except Exception as exc:  # noqa: BLE001 — treat as provider failure
+                if isinstance(exc, ProviderError) and exc.exhausts_quota:
+                    self._quota.mark_exhausted(slot)
+                else:
+                    self._quota.refund(slot)
                 errors.append(str(exc) if isinstance(exc, ProviderError) else f"{provider.name}: {exc}")
                 failures.append((provider.name, failure_reason.classify(exc)))
                 if specific:

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.quota import Quota
+
 
 @dataclass(frozen=True, slots=True)
 class Instance:
@@ -31,6 +33,8 @@ class Instance:
     ``options_env`` pairs an option key with the ENV VARIABLE NAME holding its
     value; always optional — each var that is set lands in
     ``ProviderConfig.options`` under its key, an unset one is simply left out.
+    ``quota`` (optional) caps the instance's calls per period in the persistent
+    quota store (``src/quota.py``), keyed by instance name; None → unlimited.
     """
 
     name: str
@@ -41,6 +45,7 @@ class Instance:
     proxy_env: str | None = None
     optional_api_key: bool = False
     options_env: tuple[tuple[str, str], ...] = ()
+    quota: Quota | None = None
 
 
 # All instances that *could* run. An instance is actually enabled at startup
@@ -63,7 +68,14 @@ INSTANCES: list[Instance] = [
     Instance("duckduckgo", "duckduckgo"),
     # Brave reaches its API fine from this host directly (verified 2026-08-09);
     # the proxy var exists only for symmetry with the other external instances.
-    Instance("brave", "brave", api_key_env="BRAVE_API_KEY", proxy_env="BRAVE_PROXY"),
+    # The free plan grants 2000 queries a month (see src/providers/brave.py).
+    Instance(
+        "brave",
+        "brave",
+        api_key_env="BRAVE_API_KEY",
+        proxy_env="BRAVE_PROXY",
+        quota=Quota(2000, "monthly"),
+    ),
     # Reuses the same key (and the same token pool) as the jina reader below.
     # Unlike the reader, s.jina.ai refuses keyless access, so the key is
     # REQUIRED here — no optional_api_key — and the instance simply

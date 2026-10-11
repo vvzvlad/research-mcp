@@ -1,13 +1,14 @@
 # research-mcp
 
-A stateless **MCP facade** that hides a pyramid of search/read providers behind a
+An **MCP facade** that hides a pyramid of search/read providers behind a
 single streamable-http MCP endpoint and exposes just **4 clean tools** with good
 help texts. An LLM gets a simple "search → read" toolset (or both at once);
 behind it, several providers are tried, merged, and failed over automatically.
 
 The app does **no authentication** — it is published through Traefik + basicAuth
-on the host. It holds no application state: the only thing persisted is a log
-file under `data/` (kept on a volume).
+on the host. The only things it persists are a log file and a small quota store
+(`data/quota.sqlite3`: per-instance quota usage and the cumulative billed
+counters), both under `data/` (kept on a volume).
 
 ## Works with zero keys
 
