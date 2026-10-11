@@ -1,10 +1,10 @@
 """Octen search provider: response parsing, request body, language, failures.
 
-The payload mirrors the Web Search response shape documented on 2026-09-18 at
+The payload mirrors the Web Search response shape documented at
 https://docs.octen.ai/api-reference/search.md (envelope ``code`` / ``msg`` /
 ``request_id`` / ``data`` / ``meta``, hits under ``data.results`` with the
 snippet in ``highlight``). Network I/O is mocked with respx — no live call is
-ever made, we hold no Octen key.
+ever made.
 """
 
 from __future__ import annotations
@@ -205,7 +205,7 @@ async def test_unmappable_language_omits_the_field_entirely(make_config, languag
 
 
 def test_language_enum_matches_the_documented_set():
-    # Verbatim from the request schema (18 codes, read 2026-09-18). Note `uk`,
+    # Verbatim from the request schema (18 codes). Note `uk`,
     # `cs`, `sv` and friends are absent — do not add them on a hunch.
     assert _OCTEN_LANGS == {
         "ar", "de", "en", "es", "fr", "hi", "id", "it", "ja",

@@ -33,12 +33,9 @@ _TRANSIENT_EXC = (
 _BACKOFF_SECONDS = 0.3
 
 # Not every vendor signals an empty balance with 402. Serper answers a search
-# with HTTP 400 {"message":"Not enough credits","statusCode":400} (verified live
-# 2026-09-18 against our own key: GET /account returns balance 0 while every
-# search returns that 400), and Octen documents HTTP 403 "Insufficient balance
-# in account". Without this, an unpaid account reads in the logs as a broken
-# API — thousands of "client error (HTTP 400)" lines that look like our request
-# is malformed.
+# with HTTP 400 {"message":"Not enough credits","statusCode":400}, and Octen
+# documents HTTP 403 "Insufficient balance in account". Without this, an unpaid
+# account reads in the logs as a malformed request.
 #
 # The phrases are deliberately specific: a bare "credit" or "balance" would also
 # match a provider that merely mentions pricing in an unrelated error message.

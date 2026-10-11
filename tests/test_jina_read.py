@@ -2,9 +2,9 @@
 
 Every request asks for jina's JSON envelope (``Accept: application/json``); the
 Markdown is ``data.content`` and the site's refusal is read from
-``data.httpStatus`` / ``data.warning`` only (shape measured live 2026-10-04).
+``data.httpStatus`` / ``data.warning`` only (shape measured live).
 
-The keyed escalation contract (verified against the docs 2026-08-18): a
+The keyed escalation contract (per the docs): a
 thin/empty answer climbs a ladder of ever dearer tiers, one step at a time, and
 stops as soon as a step returns enough text —
 
@@ -728,7 +728,7 @@ async def test_error_quoted_in_the_article_body_is_not_a_refusal(make_config):
 @respx.mock
 async def test_title_source_and_date_lead_the_body(make_config):
     # JSON mode moves the plain answer's header into fields; the reader puts
-    # them back in front of the body, as the model used to see them.
+    # them back in front of the body.
     body = {
         "code": 200,
         "status": 20000,

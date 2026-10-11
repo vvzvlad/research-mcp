@@ -1,6 +1,6 @@
 """You.com search provider: response parsing, request shape, failures.
 
-The payload mirrors the response documented on 2026-09-18 at
+The payload mirrors the response documented at
 https://you.com/docs/api-reference/search (``results.web[]`` with ``url`` /
 ``title`` / ``description`` / ``snippets``). Network I/O is mocked with respx,
 like the rest of the suite.

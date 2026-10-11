@@ -1,6 +1,6 @@
 """Bright Data Web Unlocker provider: request shape and raw-body handling.
 
-The contract under test (verified against the docs 2026-09-18): POST to
+The contract under test (per the docs): POST to
 ``https://api.brightdata.com/request`` with a Bearer key and a body carrying
 ``zone`` / ``url`` / ``format: "raw"`` / ``data_format: "markdown"``, whose
 response body is the Markdown itself rather than a JSON envelope. Network I/O is

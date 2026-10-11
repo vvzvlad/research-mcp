@@ -1,6 +1,6 @@
 """You.com Search API provider (ydc-index.io web index).
 
-API (verified against the official docs 2026-09-18,
+API (per the official docs,
 https://you.com/docs/api-reference/search — the same page as clean Markdown at
 https://you.com/docs/api-reference/search.md): POST
 ``https://ydc-index.io/v1/search``, ``Content-Type: application/json``, header
@@ -42,8 +42,8 @@ YOUCOM_ENDPOINT = "https://ydc-index.io/v1/search"
 # 100 results per call"). The parameter reference states no bound of its own.
 YOUCOM_COUNT_MAX = 100
 
-# Every value the `language` enum accepts, verbatim from the parameter reference
-# (read 2026-09-18). BCP 47 in the vendor's own uppercase spelling — note it is
+# Every value the `language` enum accepts, verbatim from the parameter reference.
+# BCP 47 in the vendor's own uppercase spelling — note it is
 # not plain ISO 639-1: Chinese exists only as script variants (ZH-HANS /
 # ZH-HANT), Portuguese only as regional ones (PT-BR / PT-PT), and English has
 # both EN and EN-GB.

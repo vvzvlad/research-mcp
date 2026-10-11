@@ -1,7 +1,7 @@
 """XMLRiver search provider: XML parsing, in-body errors, request shape.
 
-The payloads mirror the Yandex-Search-API-compatible envelope documented on
-2026-09-18 at https://xmlriver.com/api/api-answer/ (``yandexsearch`` →
+The payloads mirror the Yandex-Search-API-compatible envelope documented at
+https://xmlriver.com/api/api-answer/ (``yandexsearch`` →
 ``response`` → ``results/grouping/group/doc`` with ``url`` / ``title`` /
 ``passages/passage``, or an ``error`` element instead of ``results``). Network
 I/O is mocked with respx, like the rest of the suite.

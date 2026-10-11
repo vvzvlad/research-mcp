@@ -56,12 +56,8 @@ def test_paid_types_classification():
 
 def test_search_pipeline_order():
     # Order is load-bearing: dedup keeps the hit from the earlier provider, so
-    # this list is the preference order. Proven and free first (searxng, then
-    # keyless duckduckgo, then brave, then the tavily/firecrawl search
-    # allowances we already pay for as part of their reader keys), then the
-    # proven paid workhorse jina-search, then the vendors we hold no key for
-    # yet, cheapest first, then serper (dead balance, kept wired) and exa (the
-    # most expensive).
+    # this list is the preference order (see the rationale in
+    # src/pipeline_config.py).
     #
     # duckduckgo's slot right behind searxng is the load-bearing one: it is the
     # only always-on search instance, so a deployment that DOES run SearXNG must
@@ -258,11 +254,8 @@ def test_build_threads_proxy_into_provider(monkeypatch, settings):
 
 
 def test_build_with_no_env_at_all(monkeypatch, settings):
-    # This used to assert ConfigError("No search provider enabled"): with no keys
-    # the server refused to start, so the "free minimum" was really "first deploy
-    # a SearXNG". duckduckgo (keyless, no variable of any kind) closes the search
-    # half the way trafilatura closes the read half — a completely empty
-    # environment must now BUILD, and search.
+    # duckduckgo (search) and trafilatura (read) need no variables, so a
+    # completely empty environment must BUILD, and search.
     _clear_provider_env(monkeypatch)
     pipe = Pipeline.build(settings, client=httpx.AsyncClient())
     assert pipe.search_names == ["duckduckgo"]  # the only one that needs nothing

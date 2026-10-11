@@ -1,7 +1,6 @@
 """Jina AI Reader provider.
 
-API (verified 2026-08-18 from https://docs.jina.ai/; the JSON answer measured
-live 2026-10-04): GET ``https://r.jina.ai/{url}``. Headers used here:
+API (per https://docs.jina.ai/; the JSON answer measured live): GET ``https://r.jina.ai/{url}``. Headers used here:
 
 - ``Accept: application/json`` switches the answer to a JSON envelope,
   ``{"code": 200, "status": 20000, "data": {...}, "meta": {...}}``. ``data``
@@ -27,7 +26,7 @@ live 2026-10-04): GET ``https://r.jina.ai/{url}``. Headers used here:
 
 jina answers HTTP 200 even when the site refused it, and converts the refusal
 page into ``content`` as if it were the article; only ``data.httpStatus`` and
-``data.warning`` tell (see ``_refusal``). Measured 2026-10-04: example.com →
+``data.warning`` tell (see ``_refusal``). Measured: example.com →
 httpStatus 200, no warning; a missing GitHub repo → 404 with "Target URL
 returned error 404: Not Found"; an ozon.ru category → 403; a wildberries.ru
 search → 498; a scispace.com CAPTCHA wall → 405 with a warning naming the
@@ -84,13 +83,10 @@ _ESCALATIONS: tuple[tuple[str, dict[str, str], bool], ...] = (
     # Step 3, .pdf urls ONLY — swap the conversion model for jina-ocr-v1, the
     # rest as in step 2. This is for scans (a PDF with no text layer) and for
     # PDFs served behind redirects, where no amount of HTML conversion helps.
-    # Reaching a scan at all depends on Pipeline.read: a text-free PDF used to
-    # return pypdf's "no text layer" notice as a success and never entered the
-    # read chain. That branch now falls through to us and keeps the notice only
-    # as a last resort — do not turn it back into an early return. Note the gate
-    # is the URL PATH, so this step sees a scan only when the url ends in .pdf;
-    # one recognised by Content-Type or %PDF magic alone reaches the chain but
-    # not this step.
+    # Pipeline.read lets a text-free PDF fall through to the read chain, keeping
+    # pypdf's notice only as a last resort. The gate is the URL PATH, so this
+    # step sees a scan only when the url ends in .pdf; one recognised by
+    # Content-Type or %PDF magic alone reaches the chain but not this step.
     # Price: 40x tokens, the most expensive step there is — hence last, and
     # hence never on a non-pdf url. The arithmetic, at X-Token-Budget=100000:
     # worst case 100000 * 40 = ~4M tokens, i.e. ~$0.20 for one page on the $50
@@ -251,10 +247,8 @@ class JinaRead:
         # one step at a time. Keyless mode gets no escalation at all — every
         # step is a paid feature and a keyless instance is not billed.
         #
-        # A hopeless .pdf url therefore costs up to FOUR sequential requests.
-        # That is a deliberate trade, not an oversight: it happens on roughly a
-        # hundred problem urls a month out of three thousand, and the pages it
-        # recovers are worth the latency on those.
+        # A hopeless .pdf url therefore costs up to FOUR sequential requests;
+        # that is rare, and the pages recovered are worth the latency.
         step_error: ProviderError | None = None
         if self._config.api_key:
             for label, extra_headers in steps:

@@ -18,11 +18,9 @@ from src.providers.registry import register
 
 # Minimum spacing between two SearXNG queries from this process.
 #
-# Measured on prod 2026-08-09: the only engine still working from our IP is
-# DuckDuckGo (google/brave/startpage/mojeek/qwant/yandex/bing are disabled as
-# broken). DDG cuts us off after ~4 back-to-back queries and keeps the block for
-# 7-8 minutes (8 rapid queries → only the first 4 returned hits). With a 45s gap
-# 8 of 8 queries came back with a full result set, so 45s is the safe pace.
+# Measured on prod: the only engine working from our IP is DuckDuckGo (the
+# others are disabled as broken). DDG blocks after ~4 back-to-back queries for
+# 7-8 minutes; at a 45s gap every query came back whole.
 _MIN_INTERVAL_SECONDS = 45.0
 
 
@@ -57,8 +55,7 @@ class SearxngSearch:
         # Local throttle, SKIP semantics: if the slot is taken this instance drops
         # out of the current search immediately. It must NEVER sleep here —
         # Pipeline.search() runs every search provider concurrently and awaits all
-        # of them, so waiting 45s would stall the whole web_search behind us
-        # (median gap between our searches is 2s; ~88% of them would wait).
+        # of them, so waiting 45s would stall the whole web_search behind us.
         #
         # Raise ProviderError instead of returning []: Pipeline._one() catches it,
         # logs "search '<name>' failed: ..." and the instance lands in failed=[...]
@@ -70,12 +67,9 @@ class SearxngSearch:
         # The check and the assignment are adjacent with no await between them, so
         # under asyncio they are atomic — no lock is needed here, do not add one.
         #
-        # _last_call is stamped BEFORE the request, so an attempt that fails
-        # spends the slot too — even failures DDG never saw (searxng down,
-        # connection refused, our own timeout). That is a deliberate fail-closed
-        # choice: from here we cannot tell how far a failed request got, and
-        # pacing one wasted slot is far cheaper than a 7-8 minute block. Do NOT
-        # "fix" this by moving the assignment below the request.
+        # _last_call is stamped BEFORE the request, so a failed attempt spends
+        # the slot too: we cannot tell how far it got, and one wasted slot is
+        # cheaper than a 7-8 minute block. Do not move it below the request.
         now = time.monotonic()
         if now - self._last_call < _MIN_INTERVAL_SECONDS:
             raise ProviderError(
