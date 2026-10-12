@@ -57,7 +57,8 @@ def test_paid_types_classification():
 def test_search_pipeline_order():
     # Order is load-bearing: dedup keeps the hit from the earlier provider, so
     # this list is the preference order (see the rationale in
-    # src/pipeline_config.py).
+    # src/pipeline_config.py). serper's account balance is empty; it stays wired
+    # in the pipeline on purpose.
     #
     # duckduckgo's slot right behind searxng is the load-bearing one: it is the
     # only always-on search instance, so a deployment that DOES run SearXNG must

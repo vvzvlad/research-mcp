@@ -248,7 +248,8 @@ class JinaRead:
         # step is a paid feature and a keyless instance is not billed.
         #
         # A hopeless .pdf url therefore costs up to FOUR sequential requests;
-        # that is rare, and the pages recovered are worth the latency.
+        # a deliberate trade: it hits roughly a hundred problem urls a month out
+        # of ~3000 reads, and the pages recovered are worth the latency.
         step_error: ProviderError | None = None
         if self._config.api_key:
             for label, extra_headers in steps:

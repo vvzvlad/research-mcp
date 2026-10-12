@@ -90,6 +90,10 @@ INSTANCES: list[Instance] = [
     # signals it with a 402; Tavily's status is undocumented, and _CREDIT_MARKERS
     # may not match its wording. It cannot be turned off per product — pulling
     # the key disables the reader as well.
+    #
+    # The pool is 1000 calls a month; these readers sit 4th and 6th in the read
+    # chain and win ~1% of reads (19-27 a month). Losing them when search drains
+    # the pool is a deliberate trade: the chain has five other readers.
     Instance(
         "tavily-search", "tavily_search", api_key_env="TAVILY_1_API_KEY", proxy_env="TAVILY_1_PROXY"
     ),
