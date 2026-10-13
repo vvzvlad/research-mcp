@@ -20,10 +20,11 @@ class FakePipeline:
     truncation tests use to hand the tools a page longer than the budget.
     """
 
-    def __init__(self, markdown: str | None = None, thin: bool = False):
+    def __init__(self, markdown: str | None = None, thin: bool = False, teaser: bool = False):
         self.closed = False
         self._markdown = markdown
         self._thin = thin
+        self._teaser = teaser
         # Arguments of the last search / search_and_read call (the caps and the
         # over-fetch are computed in the tool, so this is where a test sees them).
         self.search_args: tuple | None = None
@@ -70,6 +71,7 @@ class FakePipeline:
             failures=[("trafilatura", "empty")],
             thin=self._thin,
             elapsed_ms=1500,
+            teaser=self._teaser,
         )
 
     async def search_and_read(self, query, num_results, language, candidates):
@@ -85,6 +87,7 @@ class FakePipeline:
                 ok=True,
                 markdown=self._body("https://x.test"),
                 thin=self._thin,
+                teaser=self._teaser,
             ),
             ReadItem(
                 title="Boom",
@@ -410,6 +413,26 @@ async def test_search_and_read_marks_a_thin_fallback(settings):
     srv = build_server(settings, pipeline=FakePipeline(markdown="# short", thin=True))
     out = await _call(srv, "search_and_read", {"query": "q", "num_results": 1})
     assert _results(out)[0]["markdown"] == "# short" + THIN_MARKER
+
+
+# A paywall teaser is flagged as one in the batch tools too, not as "short".
+TEASER_MARKER = "\n\n[похоже на анонс за пейволлом — это только начало статьи, не вся она]"
+
+
+async def test_read_pages_flags_a_paywall_teaser(settings):
+    srv = build_server(
+        settings, pipeline=FakePipeline(markdown="# teaser", thin=True, teaser=True)
+    )
+    pages = _pages(await _call(srv, "read_pages", {"urls": ["https://a.test"]}))
+    assert pages[0]["markdown"] == "# teaser" + TEASER_MARKER
+
+
+async def test_search_and_read_flags_a_paywall_teaser(settings):
+    srv = build_server(
+        settings, pipeline=FakePipeline(markdown="# teaser", thin=True, teaser=True)
+    )
+    out = await _call(srv, "search_and_read", {"query": "q", "num_results": 1})
+    assert _results(out)[0]["markdown"] == "# teaser" + TEASER_MARKER
 
 
 # -- the combined tool ------------------------------------------------------

@@ -129,23 +129,27 @@ def format_read_status(outcome: ReadOutcome) -> str:
         return f"Статус чтения: {outcome.provider} (извлечено локально); {_seconds(outcome.elapsed_ms)}"
     status = f"Статус чтения: {outcome.provider} (провайдеров испробовано: {len(outcome.tried)})"
     if outcome.thin:
-        status += f"; {_thin_note(outcome.markdown)}"
+        status += f"; {_thin_note(outcome.markdown, outcome.teaser)}"
     return f"{status}; {_seconds(outcome.elapsed_ms)}"
 
 
-def _thin_note(markdown: str) -> str:
+def _thin_note(markdown: str, teaser: bool = False) -> str:
+    if teaser:
+        # A paywall teaser can be long; what matters is that the rest of the
+        # article is behind the wall, not how many characters came back.
+        return "похоже на анонс за пейволлом — это только начало статьи, не вся она"
     # A thin fallback is the longest of the short answers, served only because
     # nothing fuller came back: it may be the whole (short) page, or not.
     return f"текст короткий ({len(markdown)} симв.) — возможно, это не вся страница"
 
 
-def mark_thin(markdown: str) -> str:
+def mark_thin(markdown: str, teaser: bool = False) -> str:
     """``markdown`` of a thin fallback plus a marker line, for the batch tools.
 
     read_pages and search_and_read have no per-page status line, so the note
     rides in the text on its own line, like ``truncate_markdown``'s marker.
     """
-    return f"{markdown}\n\n[{_thin_note(markdown)}]"
+    return f"{markdown}\n\n[{_thin_note(markdown, teaser)}]"
 
 
 def format_read_failure_status(reason: str, tried: int) -> str:

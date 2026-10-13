@@ -99,7 +99,9 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   `.pdf` *and* jina is keyed; for HTML, that same body is
   handed to `trafilatura` so the hot path never GETs twice, then the remaining
   instances are tried in order and the first to return content
-  `>= FALLBACK_MIN_CHARS` wins.
+  `>= FALLBACK_MIN_CHARS` wins — except a bot-challenge page (that reader counts
+  as failed) or a paywall teaser (kept only as the thin fallback, which the
+  answer then flags as a teaser rather than as the whole article).
   A **YouTube video url** (`youtube.com/watch?v=…`, `/shorts/…`, `/live/…`,
   `/embed/…`, `youtu.be/…`) is answered before the probe with the video's
   **transcript** — title, channel, description and the captions as timestamped
@@ -138,7 +140,8 @@ next instance** (this is what makes `tavily-1 → tavily-2` fail over). Vendors
 that report an empty balance with some other 4xx — serper answers `400 {"message":
 "Not enough credits"}`, octen `403 "Insufficient balance"` — are recognised by
 the body and logged as `out of credits` too, so an unpaid account never reads as
-a broken API.
+a broken API. Tavily's non-standard HTTP 432 (a spent monthly plan) is read as
+`out of credits` as well.
 
 An instance is **enabled** only if its required env var(s) are set; otherwise it
 is skipped with a log line. `duckduckgo` and `trafilatura` need no config (always

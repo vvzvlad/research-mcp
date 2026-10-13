@@ -24,7 +24,9 @@ whatever its length, a failure falls through unless the reader sets
 url-specific readers are spent). Right before the first other
 instance, read detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic)
 and extracts them with pypdf. Otherwise the first instance to return content
-``>= fallback_min_chars`` wins; thin/empty/error → next instance. It returns a
+``>= fallback_min_chars`` wins; thin/empty/error → next instance. A
+bot-challenge page or a paywall teaser (``src/content_guard.py``) never wins: the
+first is a failure, the second only a thin-fallback candidate. It returns a
 ``ReadOutcome``: the markdown
 plus the winning provider, the chain that was walked and every failure along the
 way tagged with a ``src.failure_reason`` category. If all fail, it raises
@@ -50,6 +52,7 @@ from loguru import logger
 
 from src import failure_reason
 from src.config_errors import ConfigError
+from src.content_guard import detect_block
 from src.pipeline_config import (
     INSTANCES,
     PAID_TYPES,
@@ -108,9 +111,11 @@ class ReadOutcome:
     walked up to and including it (a url-specific reader enters it only for a
     url it accepts), and ``failures`` pairs every instance that did not deliver
     with its ``src.failure_reason`` category.
-    ``thin`` marks the last-resort branch: every instance came back under
-    ``fallback_min_chars`` and the longest of those scraps is what is being
-    returned.
+    ``thin`` marks the last-resort branch: no instance delivered a full page
+    (each came back under ``fallback_min_chars``, or as a paywall teaser of any
+    length) and the longest of those scraps is what is being returned.
+    ``teaser`` marks a thin answer that is a paywall teaser, so the model is
+    told it holds only the free part of the article, not just "short".
     """
 
     markdown: str
@@ -119,6 +124,7 @@ class ReadOutcome:
     failures: list[tuple[str, str]]  # (instance, reason constant)
     thin: bool
     elapsed_ms: int
+    teaser: bool = False
 
 
 @dataclass(slots=True)
@@ -128,7 +134,7 @@ class ReadItem:
     The search fields always carry the hit as the search returned it; the read
     fields are mutually exclusive — ``ok`` means ``markdown``, otherwise
     ``error`` (the message) and ``reason`` (a ``src.failure_reason`` constant,
-    for the caller to label). ``thin`` mirrors ``ReadOutcome.thin``.
+    for the caller to label). ``thin`` and ``teaser`` mirror ``ReadOutcome``.
     """
 
     title: str
@@ -139,6 +145,7 @@ class ReadItem:
     error: str | None = None
     reason: str | None = None
     thin: bool = False
+    teaser: bool = False
 
 
 @dataclass(slots=True)
@@ -803,8 +810,21 @@ class Pipeline:
             # suffix counts the extra billed calls. See _ESCALATIONS in
             # src/providers/jina.py for the current list of labels.
             billed.append(provider.name)
-            # A url-specific reader's answer is final whatever its length.
-            if specific or len(content) >= self._settings.fallback_min_chars:
+            # A generic reader can hand back a bot-challenge or a paywall teaser
+            # as if it were the article body. A url-specific reader's answer is
+            # final and is never screened. The 200 counts as billed either way.
+            # A challenge page holds nothing of the article: it fails this
+            # provider, is never served and is never kept as a thin fallback.
+            blocked = None if specific else detect_block(content)
+            teaser = blocked == failure_reason.ACCESS_DENIED
+            if blocked is not None and not teaser:
+                errors.append(f"{provider.name}: blocked page ({blocked})")
+                failures.append((provider.name, blocked))
+                continue
+            # A url-specific reader's answer is final whatever its length. A
+            # paywall teaser is never final, however long: a later reader may
+            # still have the full text.
+            if specific or (not teaser and len(content) >= self._settings.fallback_min_chars):
                 _log_ok(provider.name)
                 return ReadOutcome(
                     markdown=content,
@@ -814,12 +834,19 @@ class Pipeline:
                     thin=False,
                     elapsed_ms=_ms(),
                 )
-            # Too thin — remember the longest thin result as a last resort.
+            # Too thin, or a paywall teaser — remember the longest such result as
+            # a last resort. A teaser carries real partial text (the opening
+            # paragraphs before the subscription notice), so if no reader gets
+            # the full page it is served flagged as incomplete, not dropped.
             if best_thin is None or len(content) > len(best_thin):
                 best_thin = content
                 best_thin_name = provider.name
-            errors.append(f"{provider.name}: content too thin ({len(content)} chars)")
-            failures.append((provider.name, failure_reason.EMPTY))
+            if teaser:
+                errors.append(f"{provider.name}: paywall teaser ({len(content)} chars)")
+                failures.append((provider.name, failure_reason.ACCESS_DENIED))
+            else:
+                errors.append(f"{provider.name}: content too thin ({len(content)} chars)")
+                failures.append((provider.name, failure_reason.EMPTY))
 
         # A thin answer next to a provider that saw the site answer 404/410 is
         # the site's error page (crawl4ai converts it without a status), not a
@@ -834,6 +861,9 @@ class Pipeline:
                 failures=list(failures),
                 thin=True,
                 elapsed_ms=_ms(),
+                # The served scrap is a teaser when its own reader was the one
+                # that reported the paywall.
+                teaser=(best_thin_name, failure_reason.ACCESS_DENIED) in failures,
             )
         if pdf_notice:
             # Scanned PDF and nothing in the chain could read it either: hand
@@ -1017,6 +1047,7 @@ class Pipeline:
                         ok=True,
                         markdown=read.markdown,
                         thin=read.thin,
+                        teaser=read.teaser,
                     )
             return ReadItem(
                 title=hit.title,
