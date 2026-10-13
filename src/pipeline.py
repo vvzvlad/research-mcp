@@ -19,7 +19,9 @@ Read walks the enabled ``READ_PIPELINE`` instances in order. A
 accepts, before the probe — a YouTube video's transcript
 (``src/providers/youtube.py``), an Instagram post's audio transcript or an
 Instagram profile's posts (``src/providers/instagram.py``); its answer is final
-whatever its length, a failure falls through. Right before the first other
+whatever its length, a failure falls through unless the reader sets
+``falls_through = False`` (the YouTube readers: the read then fails once the
+url-specific readers are spent). Right before the first other
 instance, read detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic)
 and extracts them with pypdf. Otherwise the first instance to return content
 ``>= fallback_min_chars`` wins; thin/empty/error → next instance. It returns a
@@ -709,8 +711,11 @@ class Pipeline:
         # One walk over the read pipeline. A url-specific reader (a YouTube
         # video, an Instagram post or profile) is offered only the urls it
         # accepts, ahead of the probe; its answer is final whatever its length,
-        # and any failure of it is recorded like any other provider's and falls
-        # through to the rest of the chain.
+        # and any failure of it is recorded like any other provider's. The next
+        # url-specific readers are still tried; the generic chain is reached
+        # only if no failed reader set `falls_through = False` (the YouTube
+        # readers do: a generic reader gets the watch page chrome at best, a
+        # captcha page from a flagged IP), otherwise the read fails right there.
         #
         # One probe GET, run lazily once right before the first provider that is
         # not url-specific, decides the path. If it is a PDF, we are done; if it
@@ -737,10 +742,13 @@ class Pipeline:
         pdf_notice: str | None = None
         best_thin: str | None = None
         best_thin_name: str | None = None
+        chain_closed = False
         for provider in self._read:
             specific = isinstance(provider, UrlSpecificReader)
             if specific and not provider.accepts(url):
                 continue
+            if not specific and chain_closed:
+                break
             if not specific and not probed:
                 probed = True
                 pdf_text, probe_html = await self._probe(
@@ -784,6 +792,8 @@ class Pipeline:
                     # youtube that flags our egress as a bot shows only in
                     # `tried=`.
                     logger.info("read url={} -> {} failed: {}", url, provider.name, exc)
+                    if not getattr(provider, "falls_through", True):
+                        chain_closed = True
                 continue
             # Returned without raising → a billed 200 (even if too thin). One
             # jina success may hide up to three extra billed upstream calls

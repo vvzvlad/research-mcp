@@ -252,6 +252,9 @@ async def fetch_transcript(client: httpx.AsyncClient, video_id: str, retries: in
 class YouTubeRead:
     """Read a YouTube video url as its transcript (no key needed)."""
 
+    # A generic reader gets the watch page chrome at best, and Google's captcha page from a flagged IP.
+    falls_through = False
+
     def __init__(self, config: ProviderConfig) -> None:
         self.name = config.name
         self.proxy = config.proxy

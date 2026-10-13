@@ -113,8 +113,8 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   it flags — and `SUPADATA_API_KEY` is set, the paid Supadata API is asked for
   the same video's existing captions (`mode=native`: 1 credit per video, charged
   also when the video has none; no title or description in its answer).
-  A video without captions, or a fetch that fails, falls through to the normal
-  chain above.
+  When the YouTube readers fail (a video without captions, a fetch that fails),
+  the read fails with their reasons and is not passed to the normal chain above.
   An **Instagram video url** (`instagram.com/reel/…`, `/reels/…`, `/p/…`,
   `/tv/…`, and `/<username>/reel/…`, `/<username>/p/…`) is answered the same way, with a
   **transcript of its audio** — author, caption and the speech as timestamped

@@ -18,7 +18,9 @@ basicAuth on the host handles it.
   on: the server must build and both tools must work on an empty environment.
 - A `UrlSpecificReader` (`youtube`, `supadata`, `instagram`, `instagram_profile`) is offered
   only the urls it `accepts`, before the PDF probe; its answer is final, a
-  failure falls through to the rest of the read chain.
+  failure falls through to the rest of the read chain unless the reader sets
+  `falls_through = False` (the YouTube readers): then the read fails once the
+  url-specific readers are spent.
 
 ## Project structure
 - `src/server.py` — `build_server()` with the 4 `@mcp.tool` definitions.
