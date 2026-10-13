@@ -34,8 +34,10 @@ _BACKOFF_SECONDS = 0.3
 
 # Not every vendor signals an empty balance with 402. Serper answers a search
 # with HTTP 400 {"message":"Not enough credits","statusCode":400}, and Octen
-# documents HTTP 403 "Insufficient balance in account". Without this, an unpaid
-# account reads in the logs as a malformed request.
+# documents HTTP 403 "Insufficient balance in account". Supadata reports a spent
+# monthly quota as HTTP 429 "Plan usage limit was exceeded.", which would
+# otherwise read as a passing rate limit. Without this, an unpaid account reads
+# in the logs as a malformed request.
 #
 # The phrases are deliberately specific: a bare "credit" or "balance" would also
 # match a provider that merely mentions pricing in an unrelated error message.
@@ -45,6 +47,7 @@ _CREDIT_MARKERS = (
     "insufficient credits",
     "insufficient balance",
     "out of credits",
+    "plan usage limit",
 )
 
 
@@ -90,8 +93,10 @@ async def request_with_retry(
         status = response.status_code
         if status in (402, 429):
             # Out of credits / rate limited — do NOT retry, fail over instead.
-            reason = "out of credits" if status == 402 else "rate limited"
-            category = failure_reason.NO_CREDITS if status == 402 else failure_reason.RATE_LIMIT
+            # A 429 whose body names a spent balance is out of credits too.
+            no_credits = status == 402 or _is_credit_exhaustion(response)
+            reason = "out of credits" if no_credits else "rate limited"
+            category = failure_reason.NO_CREDITS if no_credits else failure_reason.RATE_LIMIT
             raise ProviderError(
                 f"{provider}: {reason} (HTTP {status})", reason=category, exhausts_quota=True
             )

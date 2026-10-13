@@ -126,12 +126,13 @@ async def test_plain_402_still_reports_out_of_credits():
 
 
 @respx.mock
-async def test_429_stays_rate_limited_even_when_the_body_mentions_credits():
+async def test_429_is_rate_limited_unless_the_body_names_a_spent_balance():
     # Rate limiting and an empty balance are different operational problems:
-    # one clears by itself, the other needs a payment. 429 must keep its own
-    # wording whatever the body says.
+    # one clears by itself, the other needs a payment.
     route = respx.get(URL).mock(
-        return_value=httpx.Response(429, json={"message": "Not enough credits"})
+        return_value=httpx.Response(
+            429, json={"details": "Request rate limit on current plan was exceeded."}
+        )
     )
 
     with pytest.raises(ProviderError) as excinfo:
@@ -139,6 +140,23 @@ async def test_429_stays_rate_limited_even_when_the_body_mentions_credits():
 
     assert "rate limited (HTTP 429)" in str(excinfo.value)
     assert excinfo.value.reason == failure_reason.RATE_LIMIT
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_429_with_a_spent_plan_quota_is_out_of_credits():
+    # Supadata answers a used-up monthly quota with 429, not 402.
+    route = respx.get(URL).mock(
+        return_value=httpx.Response(
+            429, json={"error": "limit-exceeded", "details": "Plan usage limit was exceeded."}
+        )
+    )
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _call()
+
+    assert "out of credits (HTTP 429)" in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.NO_CREDITS
     assert route.call_count == 1
 
 
