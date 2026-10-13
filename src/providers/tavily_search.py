@@ -98,6 +98,8 @@ class TavilySearch:
             # request racing its own rate-limit window.
             retries=self._config.retries,
             provider=self.name,
+            # Tavily signals a spent monthly plan with the non-standard HTTP 432.
+            out_of_credits_statuses=frozenset({432}),
         )
         try:
             data = response.json()

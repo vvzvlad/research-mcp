@@ -183,6 +183,43 @@ async def test_plain_4xx_reason(status, expected):
 
 
 @respx.mock
+async def test_extra_out_of_credits_status_is_reported_as_out_of_credits():
+    # A provider (Tavily) names HTTP 432 as its spent-plan signal via
+    # out_of_credits_statuses: it must read as out-of-credits, exhaust the quota,
+    # and not retry — exactly like 402.
+    route = respx.get(URL).mock(return_value=httpx.Response(432, text="plan exhausted"))
+
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await request_with_retry(
+                client,
+                "GET",
+                URL,
+                retries=1,
+                provider="probe",
+                out_of_credits_statuses=frozenset({432}),
+            )
+
+    assert "out of credits (HTTP 432)" in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.NO_CREDITS
+    assert excinfo.value.exhausts_quota is True
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_432_without_the_opt_in_is_a_plain_client_error():
+    # 432 is reached ONLY via out_of_credits_statuses; a provider that does not
+    # opt in still sees it as an ordinary client error.
+    respx.get(URL).mock(return_value=httpx.Response(432, text="nope"))
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _call()
+
+    assert "client error (HTTP 432)" in str(excinfo.value)
+    assert "out of credits" not in str(excinfo.value)
+
+
+@respx.mock
 async def test_credit_body_on_a_5xx_is_untouched_and_still_retries():
     # 5xx keeps the transient path regardless of body text: the marker check
     # lives in the 4xx branch only.
