@@ -8,6 +8,9 @@ Policy (cross-cutting, applied uniformly by every provider):
 - ``402`` (out of credits) and ``429`` (rate limited) are treated as a hard
   provider failure → ``ProviderError`` (no retry). This is what makes a paid
   instance fail over to the next one (e.g. tavily-1 → tavily-2).
+- A provider may name extra non-standard statuses as out-of-credits via
+  ``out_of_credits_statuses`` (Tavily answers a spent plan with HTTP 432); such a
+  status joins the branch above and is reported as "out of credits".
 - Any other 4xx is also a ``ProviderError`` (the provider cannot serve this),
   except that an exhausted balance reported with a plain 4xx instead of 402 is
   recognised and reported as "out of credits" — see ``_CREDIT_MARKERS``.
@@ -69,14 +72,17 @@ async def request_with_retry(
     *,
     retries: int,
     provider: str,
+    out_of_credits_statuses: frozenset[int] = frozenset(),
     **kwargs,
 ) -> httpx.Response:
     """Perform an HTTP request with the shared retry/credit policy.
 
     Returns a successful (2xx/3xx) ``httpx.Response``. Raises ``ProviderError``
-    for credit/limit (402/429, plus any 4xx whose body reports an exhausted
-    balance), other 4xx, exhausted retries, or transport errors. ``provider`` is
-    used only for clearer error messages.
+    for credit/limit (402/429, any status in ``out_of_credits_statuses``, plus
+    any 4xx whose body reports an exhausted balance), other 4xx, exhausted
+    retries, or transport errors. ``provider`` is used only for clearer error
+    messages. ``out_of_credits_statuses`` names extra non-standard statuses a
+    provider reports a spent balance with (Tavily's HTTP 432).
     """
     attempts = retries + 1
     last_error: str = "unknown error"
@@ -91,10 +97,15 @@ async def request_with_retry(
             raise ProviderError(f"{provider}: {last_error}") from exc
 
         status = response.status_code
-        if status in (402, 429):
+        if status in (402, 429) or status in out_of_credits_statuses:
             # Out of credits / rate limited — do NOT retry, fail over instead.
-            # A 429 whose body names a spent balance is out of credits too.
-            no_credits = status == 402 or _is_credit_exhaustion(response)
+            # A 429 whose body names a spent balance is out of credits too, and
+            # a provider-declared status (e.g. Tavily's 432) always is.
+            no_credits = (
+                status == 402
+                or status in out_of_credits_statuses
+                or _is_credit_exhaustion(response)
+            )
             reason = "out of credits" if no_credits else "rate limited"
             category = failure_reason.NO_CREDITS if no_credits else failure_reason.RATE_LIMIT
             raise ProviderError(

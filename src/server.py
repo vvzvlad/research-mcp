@@ -210,7 +210,7 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
                     # window, so each page is capped (read_page is not).
                     markdown = truncate_markdown(outcome.markdown, settings.read_batch_max_chars)
                     if outcome.thin:
-                        markdown = mark_thin(markdown)
+                        markdown = mark_thin(markdown, outcome.teaser)
                     return {"url": url, "ok": True, "markdown": markdown}, None
                 except ProviderError as exc:
                     reason = classify_read_failure(exc)
@@ -294,7 +294,7 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
                     item.markdown or "", settings.read_batch_max_chars
                 )
                 if item.thin:
-                    entry["markdown"] = mark_thin(entry["markdown"])
+                    entry["markdown"] = mark_thin(entry["markdown"], item.teaser)
             else:
                 entry["error"] = item.error
                 entry["reason"] = reason_label(item.reason or "")

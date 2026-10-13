@@ -40,6 +40,8 @@ class TavilyRead:
             headers={"Authorization": f"Bearer {self._config.api_key}"},
             retries=self._config.retries,
             provider=self.name,
+            # Tavily signals a spent monthly plan with the non-standard HTTP 432.
+            out_of_credits_statuses=frozenset({432}),
         )
         try:
             data = response.json()

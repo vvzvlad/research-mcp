@@ -12,7 +12,13 @@ import httpx
 import pytest
 import respx
 
-from src.failure_reason import NO_CREDITS, NOT_FOUND, dominant_reason
+from src.failure_reason import (
+    ACCESS_DENIED,
+    BOT_PROTECTION,
+    NO_CREDITS,
+    NOT_FOUND,
+    dominant_reason,
+)
 from src.formatting import format_search_results
 from src.pipeline import Pipeline, ReadFailed
 from src.pipeline_config import INSTANCES
@@ -710,6 +716,104 @@ async def test_read_missing_page_fails_instead_of_serving_its_thin_error_page(
     assert dominant_reason(excinfo.value.failures) == NOT_FOUND
 
 
+# A bot-challenge page long enough to clear the thin threshold: without the
+# content guard it would be accepted and served as the article.
+CAPTCHA_PAGE = "Just a moment...\n\n" + ("Please wait while we verify your browser. " * 11)
+
+
+@respx.mock
+async def test_read_block_page_is_not_served_and_fails_with_the_category(monkeypatch, settings):
+    # A generic reader returns a bot-challenge page as `content`. It must NOT be
+    # served (not as the answer, not as a thin fallback): the chain continues and
+    # the read fails with the block category.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("CRAWL4AI_URL", "http://crawl4ai.test")
+    monkeypatch.setenv("CRAWL4AI_TOKEN", "tok")
+    assert len(CAPTCHA_PAGE) >= settings.fallback_min_chars  # would otherwise be served
+
+    url = "https://wall.test/page"
+    # trafilatura gets nothing from the thin probe body; jina and crawl4ai each
+    # return the captcha wall.
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(CAPTCHA_PAGE))
+    respx.post("http://crawl4ai.test/md").mock(
+        return_value=httpx.Response(200, json={"markdown": CAPTCHA_PAGE, "success": True})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ReadFailed) as excinfo:
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert CAPTCHA_PAGE not in str(excinfo.value)  # the wall text is not handed back
+    assert ("jina", BOT_PROTECTION) in excinfo.value.failures
+    assert ("crawl4ai", BOT_PROTECTION) in excinfo.value.failures
+    assert dominant_reason(excinfo.value.failures) == BOT_PROTECTION
+
+
+# The measured NYT shape: nav chrome, the opening paragraphs of the real article,
+# then the preview notice — long, well past both the thin and the captcha caps.
+PAYWALL_TEASER = (
+    "Skip to content\n\nTechnology\n\n"
+    + "The opening paragraph of the real article, served before the wall. " * 40
+    + "\n\nYou have a preview view of this article while we are checking your access."
+)
+
+
+@respx.mock
+async def test_read_paywall_teaser_is_served_as_a_thin_fallback(monkeypatch, settings):
+    # The teaser holds real partial text: it is not accepted as a full page, but
+    # when nothing else in the chain delivers, it is served flagged as thin.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    url = "https://paper.test/article"
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(PAYWALL_TEASER))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.markdown == PAYWALL_TEASER
+    assert outcome.thin is True
+    assert outcome.teaser is True
+    assert outcome.provider == "jina"
+    assert ("jina", ACCESS_DENIED) in outcome.failures
+
+
+@respx.mock
+async def test_read_full_text_from_a_later_reader_beats_a_paywall_teaser(monkeypatch, settings):
+    # A long teaser is never final: the chain goes on, and a reader that gets
+    # the whole article wins over it.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("CRAWL4AI_URL", "http://crawl4ai.test")
+    monkeypatch.setenv("CRAWL4AI_TOKEN", "tok")
+    url = "https://paper.test/article"
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(PAYWALL_TEASER))
+    full = "# The whole article\n\n" + ("Every paragraph of the article. " * 60)
+    respx.post("http://crawl4ai.test/md").mock(
+        return_value=httpx.Response(200, json={"markdown": full, "success": True})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.provider == "crawl4ai"
+    assert outcome.thin is False
+    assert "The whole article" in outcome.markdown
+    assert ("jina", ACCESS_DENIED) in outcome.failures
+
+
 @respx.mock
 async def test_read_thin_page_survives_a_404_from_a_provider_api(monkeypatch, settings):
     # crawl4ai's OWN endpoint answers 404 (a wrong CRAWL4AI_URL): that says
@@ -1220,6 +1324,26 @@ def _mock_dead(url: str):
     route = respx.get(url).mock(side_effect=httpx.ConnectError("nope"))
     respx.get(f"https://r.jina.ai/{url}").mock(side_effect=httpx.ConnectError("nope"))
     return route
+
+
+@respx.mock
+async def test_search_and_read_carries_the_teaser_flag(monkeypatch, settings):
+    # The batch entry must say "paywall teaser", so the flag has to travel from
+    # the read into the ReadItem.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    [url] = _mock_search_hits(1)
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(PAYWALL_TEASER))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search_and_read("q", num_results=1, language=None, candidates=1)
+    finally:
+        await pipe.aclose()
+
+    [item] = outcome.items
+    assert item.ok and item.thin and item.teaser
 
 
 @respx.mock
