@@ -125,7 +125,8 @@ INSTANCES: list[Instance] = [
     # --- read ---
     # The url-specific readers: each serves only the urls it accepts, ahead of
     # the probe. Their hosts are fixed, so they fetch with the plain client bound
-    # to their proxy, not the SSRF-guarded one.
+    # to their proxy, not the SSRF-guarded one — except scholarly, which fetches
+    # the third-party urls Unpaywall names and so gets the guarded client.
     # YouTube transcripts need no key. Some hosts (prod among them) cannot reach
     # youtube.com directly, or are flagged by it as a bot — hence the proxy.
     Instance("youtube", "youtube", proxy_env="YOUTUBE_PROXY"),
@@ -144,6 +145,13 @@ INSTANCES: list[Instance] = [
     ),
     # An Instagram profile's posts need no key; same instagram.com proxy.
     Instance("instagram-profile", "instagram_profile", proxy_env="INSTAGRAM_PROXY"),
+    # Free OA full-text resolution for DOI/arXiv links via Unpaywall + Europe PMC + arXiv.
+    Instance(
+        "scholarly",
+        "scholarly",
+        proxy_env="SCHOLARLY_PROXY",
+        options_env=(("unpaywall_email", "UNPAYWALL_EMAIL"),),
+    ),
     Instance("trafilatura", "trafilatura"),
     # jina works keyless (lower rate limit); the key is optional.
     Instance(
@@ -208,6 +216,7 @@ READ_PIPELINE: list[str] = [
     "supadata",
     "instagram",
     "instagram-profile",
+    "scholarly",
     "trafilatura",
     "jina",
     "crawl4ai",

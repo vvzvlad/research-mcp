@@ -85,10 +85,11 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   `searxng`: it is on everywhere, but a deployment that runs SearXNG must
   keep SearXNG's copy of every shared url.
 - **Read pipeline** (`youtube → supadata → instagram → instagram-profile →
-  trafilatura → jina → crawl4ai → tavily-1 → tavily-2 → firecrawl → brightdata`):
+  scholarly → trafilatura → jina → crawl4ai → tavily-1 → tavily-2 → firecrawl →
+  brightdata`):
   here the order IS a cost gate — it stops at the first sufficient answer, and
   `brightdata` (the anti-bot unlocker) sits last so it only ever sees pages
-  everything cheaper already bounced off. The first four are url-specific
+  everything cheaper already bounced off. The first five are url-specific
   readers: each is offered only the urls it recognises, ahead of the probe, and
   its answer is final (see below). A single probe
   GET classifies the url. PDFs (Content-Type /
@@ -131,6 +132,14 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   for its transcript (with `GROQ_API_KEY`). A last line `Next page: …/<username>/?after=<cursor>` points to
   the next 12 — reading that url continues the list. Needs no key. Hashtag pages
   are not covered: Instagram serves them only to a logged-in account.
+  A **DOI url** (`doi.org/…`) or **arXiv url** (`arxiv.org/abs/…`, `/pdf/…`) is
+  answered with the paper's legal **open-access full text**: arXiv (an arXiv url
+  or an arXiv DOI `10.48550/arXiv.…`) serves its own PDF, while any other DOI is
+  resolved through Unpaywall to a repository PDF or Europe PMC's full-text XML
+  (abstract + body) — repository copies first, the publisher landing page never
+  fetched. DOI resolution needs `UNPAYWALL_EMAIL` (a free, non-secret identifier
+  Unpaywall requires; without it DOI urls go straight to the normal chain); a
+  DOI with no OA copy falls through to the normal chain. arXiv needs no key.
 
 Cross-cutting: one transient retry (5xx / transport errors) with a short backoff;
 **402 (out of credits) / 429 (rate limited) are treated as a provider failure →

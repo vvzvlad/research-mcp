@@ -22,6 +22,7 @@ from src.providers import (  # noqa: F401  (imported for their @register side ef
     linkup_search,
     octen_search,
     parallel_search,
+    scholarly,
     searxng,
     serper,
     supadata,
