@@ -343,6 +343,9 @@ async def fetch_profile_posts(
 class InstagramRead:
     """Read an Instagram post url as a transcript of its audio (requires the Groq ``api_key``)."""
 
+    # A post without video, or one GraphQL refuses, is still a page a generic reader may read.
+    falls_through = True
+
     def __init__(self, config: ProviderConfig) -> None:
         if not config.api_key:
             raise ValueError("instagram requires an api_key (the Groq key)")
@@ -377,6 +380,9 @@ class InstagramRead:
 @register("instagram_profile")
 class InstagramProfileRead:
     """Read an Instagram profile url as one page of its posts (no key needed)."""
+
+    # A profile GraphQL refuses is still a page a generic reader may read.
+    falls_through = True
 
     def __init__(self, config: ProviderConfig) -> None:
         self.name = config.name

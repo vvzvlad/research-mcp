@@ -28,6 +28,9 @@ _PROVIDER = "supadata"
 class SupadataRead:
     """Read a YouTube video url as its native captions, through Supadata."""
 
+    # A generic reader gets the watch page chrome at best, and Google's captcha page from a flagged IP.
+    falls_through = False
+
     def __init__(self, config: ProviderConfig) -> None:
         self.name = config.name
         self.proxy = config.proxy

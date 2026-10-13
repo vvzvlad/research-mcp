@@ -125,7 +125,9 @@ class UrlSpecificReader(ReadProvider, Protocol):
     """A reader that serves only some urls (a YouTube video, an Instagram post).
 
     The pipeline offers it only the urls it ``accepts``, BEFORE the probe, and
-    its answer is final whatever its length.
+    its answer is final whatever its length. A class attribute ``falls_through``
+    (read with a ``True`` default) says whether its failure passes the url on to
+    the generic readers or fails the read once the url-specific readers are spent.
     """
 
     def accepts(self, url: str) -> bool:
