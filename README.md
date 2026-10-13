@@ -84,11 +84,11 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   that needs no configuration, which is why it sits directly behind
   `searxng`: it is on everywhere, but a deployment that runs SearXNG must
   keep SearXNG's copy of every shared url.
-- **Read pipeline** (`youtube → instagram → instagram-profile → trafilatura →
-  jina → crawl4ai → tavily-1 → tavily-2 → firecrawl → brightdata`): here the
-  order IS a cost gate — it stops at the first sufficient answer, and
+- **Read pipeline** (`youtube → supadata → instagram → instagram-profile →
+  trafilatura → jina → crawl4ai → tavily-1 → tavily-2 → firecrawl → brightdata`):
+  here the order IS a cost gate — it stops at the first sufficient answer, and
   `brightdata` (the anti-bot unlocker) sits last so it only ever sees pages
-  everything cheaper already bounced off. The first three are url-specific
+  everything cheaper already bounced off. The first four are url-specific
   readers: each is offered only the urls it recognises, ahead of the probe, and
   its answer is final (see below). A single probe
   GET classifies the url. PDFs (Content-Type /
@@ -109,6 +109,10 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   The spoken language comes from the audio track marked "original" on an
   auto-dubbed video (which carries auto-generated captions for every dub), and
   from the single auto-generated track on a plain one.
+  When that fails — YouTube answers "Sign in to confirm you're not a bot" to IPs
+  it flags — and `SUPADATA_API_KEY` is set, the paid Supadata API is asked for
+  the same video's existing captions (`mode=native`: 1 credit per video, charged
+  also when the video has none; no title or description in its answer).
   A video without captions, or a fetch that fails, falls through to the normal
   chain above.
   An **Instagram video url** (`instagram.com/reel/…`, `/reels/…`, `/p/…`,
@@ -190,7 +194,8 @@ well before the readers do; when it runs out, both halves stop working.
 Keyless until registered: `XMLRIVER_USER_ID` + `XMLRIVER_API_KEY` (Yandex SERP),
 `PARALLEL_API_KEY`, `OCTEN_API_KEY`, `LINKUP_API_KEY`, `YOUCOM_API_KEY`, and
 `BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `GROQ_API_KEY` enables the `instagram`
-reader (Instagram transcripts); the `youtube` and `instagram-profile` readers
+reader (Instagram transcripts), `SUPADATA_API_KEY` the `supadata` reader (paid
+fallback for YouTube transcripts); the `youtube` and `instagram-profile` readers
 take no key and are always on.
 
 ## Proxy
@@ -200,7 +205,8 @@ setting `<INSTANCE>_PROXY` — useful for clean egress past IP-based blocks (e.g
 Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`,
 `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`,
 `XMLRIVER_PROXY`, `PARALLEL_PROXY`, `OCTEN_PROXY`, `LINKUP_PROXY`,
-`YOUCOM_PROXY`, `BRIGHTDATA_PROXY`, `YOUTUBE_PROXY`, `INSTAGRAM_PROXY`. The
+`YOUCOM_PROXY`, `BRIGHTDATA_PROXY`, `YOUTUBE_PROXY`, `SUPADATA_PROXY`,
+`INSTAGRAM_PROXY`. The
 instances that do not need clean egress
 have no proxy: the internal `searxng` / `crawl4ai` / `trafilatura` (which still
 take their own url/token vars) and the keyless `duckduckgo`.

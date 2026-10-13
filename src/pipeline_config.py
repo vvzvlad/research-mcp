@@ -129,6 +129,8 @@ INSTANCES: list[Instance] = [
     # YouTube transcripts need no key. Some hosts (prod among them) cannot reach
     # youtube.com directly, or are flagged by it as a bot — hence the proxy.
     Instance("youtube", "youtube", proxy_env="YOUTUBE_PROXY"),
+    # Paid fallback for YouTube transcripts when YouTube bot-walls our IP; native captions only.
+    Instance("supadata", "supadata", api_key_env="SUPADATA_API_KEY", proxy_env="SUPADATA_PROXY"),
     # Instagram post transcripts: Groq Whisper transcribes the audio, so the key
     # is Groq's and no key means no instance. Two upstreams, two proxies:
     # INSTAGRAM_PROXY for instagram.com where Instagram is blocked, GROQ_PROXY
@@ -203,6 +205,7 @@ SEARCH_PIPELINE: list[str] = [
 # they run before the probe, on the urls they accept only.
 READ_PIPELINE: list[str] = [
     "youtube",
+    "supadata",
     "instagram",
     "instagram-profile",
     "trafilatura",
@@ -240,5 +243,6 @@ PAID_TYPES: frozenset[str] = frozenset(
         "youcom_search",
         "brightdata",
         "instagram",  # Groq bills every transcription
+        "supadata",  # 1 credit per native transcript; Supadata also bills a 206 this does not count
     }
 )
