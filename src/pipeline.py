@@ -18,7 +18,8 @@ Read walks the enabled ``READ_PIPELINE`` instances in order. A
 ``UrlSpecificReader`` (``src/providers/base.py``) is offered only the urls it
 accepts, before the probe — a YouTube video's transcript
 (``src/providers/youtube.py``), an Instagram post's audio transcript or an
-Instagram profile's posts (``src/providers/instagram.py``); its answer is final
+Instagram profile's posts (``src/providers/instagram.py``), a DOI or arXiv
+paper's open-access full text (``src/providers/scholarly.py``); its answer is final
 whatever its length, a failure falls through unless the reader sets
 ``falls_through = False`` (the YouTube readers: the read then fails once the
 url-specific readers are spent). Right before the first other
@@ -446,7 +447,7 @@ class Pipeline:
                 "No search provider enabled. duckduckgo needs no config, so this "
                 "should not happen — check src/pipeline_config.py."
             )
-        # The url-specific readers (youtube, instagram-profile) are keyless and
+        # The url-specific readers (youtube, instagram-profile, scholarly) are keyless and
         # always enabled, so they do not count: an ordinary url needs a reader
         # that takes every url.
         if all(isinstance(p, UrlSpecificReader) for p in read_instances):
@@ -716,9 +717,10 @@ class Pipeline:
             )
 
         # One walk over the read pipeline. A url-specific reader (a YouTube
-        # video, an Instagram post or profile) is offered only the urls it
-        # accepts, ahead of the probe; its answer is final whatever its length,
-        # and any failure of it is recorded like any other provider's. The next
+        # video, an Instagram post or profile, a DOI or arXiv paper) is offered
+        # only the urls it accepts, ahead of the probe; its answer is final
+        # whatever its length, and any failure of it is recorded like any other
+        # provider's. The next
         # url-specific readers are still tried; the generic chain is reached
         # only if no failed reader set `falls_through = False` (the YouTube
         # readers do: a generic reader gets the watch page chrome at best, a
@@ -918,11 +920,13 @@ class Pipeline:
                     f"{provider.name}: no main content extracted", reason=failure_reason.EMPTY
                 )
             return content
-        if isinstance(provider, TrafilaturaRead):
-            # trafilatura is the only read provider that fetches the target url
-            # from OUR process, so it is the only one that needs the SSRF-guarded
-            # client. Every other read provider POSTs the url to its own API and
-            # never fetches it from here.
+        if isinstance(provider, TrafilaturaRead) or getattr(
+            provider, "fetches_target_locally", False
+        ):
+            # trafilatura and the readers that set `fetches_target_locally`
+            # (scholarly) fetch third-party urls from OUR process, so they need
+            # the SSRF-guarded client. Every other read provider sends the url
+            # to its own API or calls a fixed host, and never fetches it here.
             return await provider.read(self._clients.guarded_client_for(provider.proxy), url)
         return await provider.read(self._clients.client_for(provider.proxy), url)
 

@@ -130,6 +130,9 @@ class UrlSpecificReader(ReadProvider, Protocol):
     its answer is final whatever its length. A class attribute ``falls_through``
     (read with a ``True`` default) says whether its failure passes the url on to
     the generic readers or fails the read once the url-specific readers are spent.
+    An optional class attribute ``fetches_target_locally`` (read with a ``False``
+    default) marks a reader that GETs third-party urls from our own process, so
+    the pipeline hands it the SSRF-guarded client instead of the plain one.
     """
 
     def accepts(self, url: str) -> bool:

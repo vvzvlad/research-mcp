@@ -67,7 +67,7 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
 
 - **Search pipeline** (`searxng → duckduckgo → brave → tavily-search →
   firecrawl-search → jina-search → xmlriver → parallel → octen → linkup → youcom
-  → serper → exa`):
+  → serper → exa → openalex → semantic-scholar`):
   enabled instances run concurrently; results are merged and deduplicated by
   normalized URL (earlier pipeline position wins). Position is therefore a
   **dedup preference, not a cost gate** — every enabled instance is called on
@@ -84,11 +84,15 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   that needs no configuration, which is why it sits directly behind
   `searxng`: it is on everywhere, but a deployment that runs SearXNG must
   keep SearXNG's copy of every shared url.
+  `openalex` and `semantic-scholar` (free keys `OPENALEX_API_KEY`,
+  `SEMANTIC_SCHOLAR_API_KEY`) mix scholarly papers into every search, linked by
+  their DOI or arXiv url where one exists so the `scholarly` reader can open them.
 - **Read pipeline** (`youtube → supadata → instagram → instagram-profile →
-  trafilatura → jina → crawl4ai → tavily-1 → tavily-2 → firecrawl → brightdata`):
+  scholarly → trafilatura → jina → crawl4ai → tavily-1 → tavily-2 → firecrawl →
+  brightdata`):
   here the order IS a cost gate — it stops at the first sufficient answer, and
   `brightdata` (the anti-bot unlocker) sits last so it only ever sees pages
-  everything cheaper already bounced off. The first four are url-specific
+  everything cheaper already bounced off. The first five are url-specific
   readers: each is offered only the urls it recognises, ahead of the probe, and
   its answer is final (see below). A single probe
   GET classifies the url. PDFs (Content-Type /
@@ -133,6 +137,14 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   for its transcript (with `GROQ_API_KEY`). A last line `Next page: …/<username>/?after=<cursor>` points to
   the next 12 — reading that url continues the list. Needs no key. Hashtag pages
   are not covered: Instagram serves them only to a logged-in account.
+  A **DOI url** (`doi.org/…`) or **arXiv url** (`arxiv.org/abs/…`, `/pdf/…`) is
+  answered with the paper's legal **open-access full text**: arXiv (an arXiv url
+  or an arXiv DOI `10.48550/arXiv.…`) serves its own PDF, while any other DOI is
+  resolved through Unpaywall to a repository PDF or Europe PMC's full-text XML
+  (abstract + body) — repository copies first, the publisher landing page never
+  fetched. DOI resolution needs `UNPAYWALL_EMAIL` (a free, non-secret identifier
+  Unpaywall requires; without it DOI urls go straight to the normal chain); a
+  DOI with no OA copy falls through to the normal chain. arXiv needs no key.
 
 Cross-cutting: one transient retry (5xx / transport errors) with a short backoff;
 **402 (out of credits) / 429 (rate limited) are treated as a provider failure →
@@ -196,7 +208,9 @@ of one shared monthly pool. Search runs on every query and will drain that pool
 well before the readers do; when it runs out, both halves stop working.
 Keyless until registered: `XMLRIVER_USER_ID` + `XMLRIVER_API_KEY` (Yandex SERP),
 `PARALLEL_API_KEY`, `OCTEN_API_KEY`, `LINKUP_API_KEY`, `YOUCOM_API_KEY`, and
-`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `GROQ_API_KEY` enables the `instagram`
+`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `OPENALEX_API_KEY` and
+`SEMANTIC_SCHOLAR_API_KEY` (both free) enable scholarly search, `UNPAYWALL_EMAIL`
+the DOI half of the `scholarly` reader. `GROQ_API_KEY` enables the `instagram`
 reader (Instagram transcripts), `SUPADATA_API_KEY` the `supadata` reader (paid
 fallback for YouTube transcripts); the `youtube` and `instagram-profile` readers
 take no key and are always on.
@@ -209,7 +223,8 @@ Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `BRAVE_PROXY`,
 `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`,
 `XMLRIVER_PROXY`, `PARALLEL_PROXY`, `OCTEN_PROXY`, `LINKUP_PROXY`,
 `YOUCOM_PROXY`, `BRIGHTDATA_PROXY`, `YOUTUBE_PROXY`, `SUPADATA_PROXY`,
-`INSTAGRAM_PROXY`. The
+`INSTAGRAM_PROXY`, `SCHOLARLY_PROXY`, `OPENALEX_PROXY`,
+`SEMANTIC_SCHOLAR_PROXY`. The
 instances that do not need clean egress
 have no proxy: the internal `searxng` / `crawl4ai` / `trafilatura` (which still
 take their own url/token vars) and the keyless `duckduckgo`.

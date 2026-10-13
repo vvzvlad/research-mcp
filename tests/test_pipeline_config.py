@@ -77,6 +77,8 @@ def test_search_pipeline_order():
         "youcom",
         "serper",
         "exa",
+        "openalex",
+        "semantic-scholar",
     ]
 
 
@@ -262,8 +264,9 @@ def test_build_with_no_env_at_all(monkeypatch, settings):
     assert pipe.search_names == ["duckduckgo"]  # the only one that needs nothing
     assert isinstance(pipe._search[0], DuckDuckGoSearch)
     # Its read-side counterpart trafilatura, behind the keyless url-specific
-    # readers (instagram needs the Groq key, so it is off).
-    assert pipe.read_names == ["youtube", "instagram-profile", "trafilatura", "jina"]
+    # readers (youtube, instagram-profile and scholarly; instagram needs the Groq
+    # key, so it is off).
+    assert pipe.read_names == ["youtube", "instagram-profile", "scholarly", "trafilatura", "jina"]
     # Keyless means unbilled: an empty env must cost nothing.
     assert "duckduckgo" not in pipe._paid
 
