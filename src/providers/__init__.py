@@ -24,6 +24,7 @@ from src.providers import (  # noqa: F401  (imported for their @register side ef
     parallel_search,
     searxng,
     serper,
+    supadata,
     tavily,
     tavily_search,
     trafilatura,

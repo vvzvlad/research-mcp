@@ -16,7 +16,7 @@ basicAuth on the host handles it.
   an instance only when its required variables are set.
 - `duckduckgo` (search) and `trafilatura` (read) name no ENV var and are always
   on: the server must build and both tools must work on an empty environment.
-- A `UrlSpecificReader` (`youtube`, `instagram`, `instagram_profile`) is offered
+- A `UrlSpecificReader` (`youtube`, `supadata`, `instagram`, `instagram_profile`) is offered
   only the urls it `accepts`, before the PDF probe; its answer is final, a
   failure falls through to the rest of the read chain.
 
