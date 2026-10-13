@@ -67,7 +67,7 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
 
 - **Search pipeline** (`searxng → duckduckgo → brave → tavily-search →
   firecrawl-search → jina-search → xmlriver → parallel → octen → linkup → youcom
-  → serper → exa`):
+  → serper → exa → openalex → semantic-scholar`):
   enabled instances run concurrently; results are merged and deduplicated by
   normalized URL (earlier pipeline position wins). Position is therefore a
   **dedup preference, not a cost gate** — every enabled instance is called on
@@ -84,6 +84,9 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   that needs no configuration, which is why it sits directly behind
   `searxng`: it is on everywhere, but a deployment that runs SearXNG must
   keep SearXNG's copy of every shared url.
+  `openalex` and `semantic-scholar` (free keys `OPENALEX_API_KEY`,
+  `SEMANTIC_SCHOLAR_API_KEY`) mix scholarly papers into every search, linked by
+  their DOI or arXiv url where one exists so the `scholarly` reader can open them.
 - **Read pipeline** (`youtube → supadata → instagram → instagram-profile →
   scholarly → trafilatura → jina → crawl4ai → tavily-1 → tavily-2 → firecrawl →
   brightdata`):
@@ -202,7 +205,9 @@ of one shared monthly pool. Search runs on every query and will drain that pool
 well before the readers do; when it runs out, both halves stop working.
 Keyless until registered: `XMLRIVER_USER_ID` + `XMLRIVER_API_KEY` (Yandex SERP),
 `PARALLEL_API_KEY`, `OCTEN_API_KEY`, `LINKUP_API_KEY`, `YOUCOM_API_KEY`, and
-`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `GROQ_API_KEY` enables the `instagram`
+`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `OPENALEX_API_KEY` and
+`SEMANTIC_SCHOLAR_API_KEY` (both free) enable scholarly search, `UNPAYWALL_EMAIL`
+the DOI half of the `scholarly` reader. `GROQ_API_KEY` enables the `instagram`
 reader (Instagram transcripts), `SUPADATA_API_KEY` the `supadata` reader (paid
 fallback for YouTube transcripts); the `youtube` and `instagram-profile` readers
 take no key and are always on.
@@ -215,7 +220,8 @@ Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `BRAVE_PROXY`,
 `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`,
 `XMLRIVER_PROXY`, `PARALLEL_PROXY`, `OCTEN_PROXY`, `LINKUP_PROXY`,
 `YOUCOM_PROXY`, `BRIGHTDATA_PROXY`, `YOUTUBE_PROXY`, `SUPADATA_PROXY`,
-`INSTAGRAM_PROXY`. The
+`INSTAGRAM_PROXY`, `SCHOLARLY_PROXY`, `OPENALEX_PROXY`,
+`SEMANTIC_SCHOLAR_PROXY`. The
 instances that do not need clean egress
 have no proxy: the internal `searxng` / `crawl4ai` / `trafilatura` (which still
 take their own url/token vars) and the keyless `duckduckgo`.

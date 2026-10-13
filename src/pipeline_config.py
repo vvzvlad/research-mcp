@@ -122,6 +122,18 @@ INSTANCES: list[Instance] = [
     Instance("youcom", "youcom_search", api_key_env="YOUCOM_API_KEY", proxy_env="YOUCOM_PROXY"),
     Instance("serper", "serper", api_key_env="SERPER_API_KEY", proxy_env="SERPER_PROXY"),
     Instance("exa", "exa", api_key_env="EXA_API_KEY", proxy_env="EXA_PROXY"),
+    # Scholarly indexes: papers mixed into every web_search. Free with a key;
+    # keyless is no option (OpenAlex allows ~100 searches a day without one,
+    # Semantic Scholar answers 429 from the first request), so no key, no instance.
+    Instance(
+        "openalex", "openalex_search", api_key_env="OPENALEX_API_KEY", proxy_env="OPENALEX_PROXY"
+    ),
+    Instance(
+        "semantic-scholar",
+        "semantic_scholar_search",
+        api_key_env="SEMANTIC_SCHOLAR_API_KEY",
+        proxy_env="SEMANTIC_SCHOLAR_PROXY",
+    ),
     # --- read ---
     # The url-specific readers: each serves only the urls it accepts, ahead of
     # the probe. Their hosts are fixed, so they fetch with the plain client bound
@@ -187,6 +199,8 @@ INSTANCES: list[Instance] = [
 # readers' monthly pool, see above), then jina-search (~$0.0005/query), then
 # the rest cheapest first (xmlriver ~$0.0003 on the Yandex index, parallel and
 # octen at $1/1k, linkup and youcom at $5/1k), then serper, then exa at $7/1k.
+# The free scholarly indexes (openalex, semantic-scholar) close the list: they
+# add papers, and a paper url a web engine also returned keeps the web copy.
 #
 # duckduckgo sits directly after searxng: it is a SERP scrape that is on in
 # every deployment, so behind searxng it only adds urls nobody ahead returned.
@@ -206,6 +220,8 @@ SEARCH_PIPELINE: list[str] = [
     "youcom",
     "serper",
     "exa",
+    "openalex",
+    "semantic-scholar",
 ]
 # Read is sequential and stops at the first sufficient answer, so here the order
 # IS a cost gate: brightdata sits last because it is the only one that bills for
@@ -233,7 +249,8 @@ READ_PIPELINE: list[str] = [
 # paid. brave is metered too: the free plan grants a 2000-queries-per-month quota
 # and answers 429 once it is spent (there is no overage on it); the paid plans
 # are billed separately. It is listed here because the accounting tracks metered
-# external calls, not invoices.
+# external calls, not invoices. openalex_search likewise: every search is charged
+# against the key's free daily budget. semantic_scholar_search is only rate-limited.
 PAID_TYPES: frozenset[str] = frozenset(
     {
         "brave",
@@ -253,5 +270,6 @@ PAID_TYPES: frozenset[str] = frozenset(
         "brightdata",
         "instagram",  # Groq bills every transcription
         "supadata",  # 1 credit per native transcript; Supadata also bills a 206 this does not count
+        "openalex_search",
     }
 )

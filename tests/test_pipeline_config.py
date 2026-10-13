@@ -77,6 +77,8 @@ def test_search_pipeline_order():
         "youcom",
         "serper",
         "exa",
+        "openalex",
+        "semantic-scholar",
     ]
 
 
