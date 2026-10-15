@@ -99,3 +99,9 @@ make run               # serve streamable-http on MCP_HOST:MCP_PORT, endpoint /m
   the review", "since the incident") goes into the commit message.
 - This file stays under ~150 lines: only what an agent would get wrong without it. No decision
   history, incident logs or retelling of the code.
+
+## FPF
+
+Read a pattern through the `fpf` MCP (`read_pattern <ID>`) before applying it.
+
+- Adding a provider, reordering `SEARCH_PIPELINE`/`READ_PIPELINE` or changing failover and rerank — KCAE.EVAL "Compare Access Arrangements by Useful Results and Full Cost": compare on hard cases kept apart from the ones used for tuning (`tests/fixtures/read_cases.yaml`), counting useful pages and the full cost — billed calls, quota, latency — not hit counts.
