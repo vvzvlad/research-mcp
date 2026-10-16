@@ -35,6 +35,9 @@ class Instance:
     ``ProviderConfig.options`` under its key, an unset one is simply left out.
     ``quota`` (optional) caps the instance's calls per period in the persistent
     quota store (``src/quota.py``), keyed by instance name; None → unlimited.
+    ``disabled_by_env`` names a var which, set to a non-empty value, switches the
+    instance off (empty counts as unset, like every var here) — for an instance
+    that steps aside when another one covers the same upstream.
     """
 
     name: str
@@ -46,10 +49,12 @@ class Instance:
     optional_api_key: bool = False
     options_env: tuple[tuple[str, str], ...] = ()
     quota: Quota | None = None
+    disabled_by_env: str | None = None
 
 
 # All instances that *could* run. An instance is actually enabled at startup
-# only if every required ENV var it names is set (see pipeline.py). Multiple
+# only if every required ENV var it names is set and its `disabled_by_env` var,
+# if any, is not (see pipeline.py). Multiple
 # instances of one type are allowed (tavily-1 / tavily-2 with different keys).
 # External (public-internet) instances carry a `proxy_env` so they can be routed
 # through a clean-egress SOCKS5/HTTP proxy (some are IP-blocked by Cloudflare).
@@ -59,13 +64,16 @@ class Instance:
 INSTANCES: list[Instance] = [
     # --- search ---
     Instance("searxng", "searxng", url_env="SEARXNG_URL"),
-    # No key, no url, no variable of any kind: the only search instance that is
-    # ALWAYS enabled. It is the search half of the zero-config floor (the
-    # trafilatura of searching), which is what keeps `Pipeline.build` working on
-    # a completely empty environment — before it, "free minimum" meant "first
-    # deploy a SearXNG". It scrapes the no-JS SERP, so it is free but fragile:
-    # it sits behind searxng in the pipeline, never in front of it.
-    Instance("duckduckgo", "duckduckgo"),
+    # No key, no url: the search half of the zero-config floor (the trafilatura
+    # of searching), which is what keeps `Pipeline.build` working on a
+    # completely empty environment. It scrapes the no-JS SERP, so it is free but
+    # fragile.
+    #
+    # It steps aside when SEARXNG_URL is set: our SearXNG queries the very same
+    # html.duckduckgo.com endpoint from the same egress IP (DuckDuckGo is the only
+    # engine it still has), and DuckDuckGo already answers it with CAPTCHAs many
+    # times a day — a second concurrent query per search only adds to that.
+    Instance("duckduckgo", "duckduckgo", disabled_by_env="SEARXNG_URL"),
     # Brave reaches its API directly from this host; the proxy var exists only
     # for symmetry with the other external instances.
     # The free plan grants 2000 queries a month (see src/providers/brave.py).
@@ -202,10 +210,9 @@ INSTANCES: list[Instance] = [
 # The free scholarly indexes (openalex, semantic-scholar) close the list: they
 # add papers, and a paper url a web engine also returned keeps the web copy.
 #
-# duckduckgo sits directly after searxng: it is a SERP scrape that is on in
-# every deployment, so behind searxng it only adds urls nobody ahead returned.
-# With the reranker on (JINA_API_KEY set) the merged list is reordered by
-# relevance before the trim, so position does not fix the final order.
+# searxng and duckduckgo never run together (duckduckgo steps aside when
+# SEARXNG_URL is set, see its instance), so whichever of the two is enabled
+# heads the list.
 SEARCH_PIPELINE: list[str] = [
     "searxng",
     "duckduckgo",

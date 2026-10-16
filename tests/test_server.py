@@ -170,8 +170,8 @@ async def test_descriptions_are_verbatim_english(server):
     by_name = {t.name: t for t in await server.list_tools()}
     ws = by_name["web_search"].description
     assert ws.startswith("Web search. Aggregates several sources")
-    # The source list must not name a stale roster: duckduckgo is always on and
-    # the paid vendors come and go with their keys.
+    # The source list must not name a stale roster: duckduckgo is the keyless
+    # default and the paid vendors come and go with their keys.
     assert "DuckDuckGo out of the box" in ws
     assert "This is ONLY search, it does NOT read pages." in ws
     rp = by_name["read_page"].description

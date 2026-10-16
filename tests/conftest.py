@@ -69,6 +69,18 @@ _PROVIDER_ENV_VARS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _drop_shell_no_proxy(monkeypatch) -> None:
+    """Keep the developer's shell NO_PROXY away from every test.
+
+    httpx reads NO_PROXY whenever a client is built, and httpx 0.28.1 cannot
+    parse an IPv6 CIDR entry in it (``fd00::/8`` → ``InvalidURL: Invalid port:
+    ':'``): every client construction fails, and with it most of the suite.
+    """
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+
 def _clear_provider_env(monkeypatch) -> None:
     """Unset every provider ENV var so a test controls the enabled instances."""
     for var in _PROVIDER_ENV_VARS:
@@ -76,11 +88,11 @@ def _clear_provider_env(monkeypatch) -> None:
 
 
 def _mock_duckduckgo_rate_limited() -> None:
-    """Route the always-on duckduckgo instance to its own soft-block answer.
+    """Route the duckduckgo instance to its own soft-block answer.
 
-    duckduckgo names NO env var (that is the whole point of it), so
-    ``_clear_provider_env`` cannot switch it off: every ``Pipeline.build``
-    enables it and every pipeline-level search fires a POST at it. A test about
+    duckduckgo needs NO env var (that is the whole point of it), so
+    ``_clear_provider_env`` switches it ON: every ``Pipeline.build`` without
+    SEARXNG_URL enables it and every pipeline-level search fires a POST at it. A test about
     OTHER providers calls this so the instance fails deterministically — 202 +
     "Ratelimit" is DuckDuckGo's own rate-limit block, which the provider turns
     into a ``ProviderError``, so it drops out of the merge and out of the
@@ -91,22 +103,6 @@ def _mock_duckduckgo_rate_limited() -> None:
     ``assert_all_mocked`` turned off hit the real DuckDuckGo.
     """
     respx.post(DDG_ENDPOINT).mock(return_value=httpx.Response(202, text="Ratelimit"))
-
-
-def _mock_duckduckgo_no_results() -> None:
-    """Route the always-on duckduckgo instance to DuckDuckGo's own empty answer.
-
-    The counterpart of ``_mock_duckduckgo_rate_limited`` for a test about an
-    honestly empty search: the instance answers 200 with the "no results"
-    marker, so it lands in ``empty=[...]`` instead of ``failed=[...]`` and the
-    test's premise (every instance answered, nobody had anything) still holds
-    with duckduckgo in the pipeline.
-    """
-    respx.post(DDG_ENDPOINT).mock(
-        return_value=httpx.Response(
-            200, text='<html><body><div class="no-results">No results.</div></body></html>'
-        )
-    )
 
 
 def _jina_answer(

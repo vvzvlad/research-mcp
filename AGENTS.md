@@ -14,8 +14,10 @@ basicAuth on the host handles it.
   (`src/pipeline_config.py`: `INSTANCES`, `SEARCH_PIPELINE`, `READ_PIPELINE`);
   the loader in `src/pipeline.py` resolves the names with `os.getenv` and enables
   an instance only when its required variables are set.
-- `duckduckgo` (search) and `trafilatura` (read) name no ENV var and are always
-  on: the server must build and both tools must work on an empty environment.
+- `duckduckgo` (search) and `trafilatura` (read) need no ENV var: the server must
+  build and both tools must work on an empty environment. `duckduckgo` steps
+  aside when `SEARXNG_URL` is set (`Instance.disabled_by_env`): our SearXNG
+  queries the same DuckDuckGo from the same IP.
 - A `UrlSpecificReader` (`youtube`, `supadata`, `instagram`, `instagram_profile`,
   `scholarly`) is offered
   only the urls it `accepts`, before the PDF probe; its answer is final, a

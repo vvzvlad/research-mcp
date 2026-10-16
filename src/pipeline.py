@@ -222,9 +222,10 @@ def _normalize_url(url: str) -> str:
 def _resolve_instance(inst: Instance) -> ProviderConfig | None:
     """Read an instance's ENV-named secrets; return a config or None if disabled.
 
-    An instance is disabled (returns None) when a required variable is unset. A
-    variable is required unless it is the api key of an ``optional_api_key``
-    instance (e.g. jina). The ``options_env`` vars that are set fill ``options``.
+    An instance is disabled (returns None) when a required variable is unset, or
+    when its ``disabled_by_env`` variable is set. A variable is required unless it
+    is the api key of an ``optional_api_key`` instance (e.g. jina). The
+    ``options_env`` vars that are set fill ``options``.
     """
     url = os.getenv(inst.url_env) if inst.url_env else None
     token = os.getenv(inst.token_env) if inst.token_env else None
@@ -235,6 +236,8 @@ def _resolve_instance(inst: Instance) -> ProviderConfig | None:
     # Options are always optional too: an unset var is simply left out.
     options = {key: value for key, env in inst.options_env if (value := os.getenv(env))}
 
+    if inst.disabled_by_env and os.getenv(inst.disabled_by_env):
+        return None
     if inst.url_env and not url:
         return None
     if inst.token_env and not token:
@@ -393,7 +396,7 @@ class Pipeline:
         for inst in INSTANCES:
             config = _resolve_instance(inst)
             if config is None:
-                logger.info("Provider instance '{}' disabled (missing ENV)", inst.name)
+                logger.info("Provider instance '{}' disabled by its ENV vars", inst.name)
                 continue
             cls_impl = REGISTRY.get(inst.type)
             if cls_impl is None:
@@ -439,7 +442,7 @@ class Pipeline:
         read_instances = [built[name] for name in READ_PIPELINE if name in built]
 
         # Unreachable on any normal configuration since duckduckgo needs no ENV
-        # and is therefore always enabled — kept as the guard against a
+        # and steps aside only for searxng — kept as the guard against a
         # SEARCH_PIPELINE that names no buildable instance (a rename, a deleted
         # Instance, a provider whose __init__ raised).
         if not search_instances:
