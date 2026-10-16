@@ -18,11 +18,16 @@ Read walks the enabled ``READ_PIPELINE`` instances in order. A
 ``UrlSpecificReader`` (``src/providers/base.py``) is offered only the urls it
 accepts, before the probe — a YouTube video's transcript
 (``src/providers/youtube.py``), an Instagram post's audio transcript or an
-Instagram profile's posts (``src/providers/instagram.py``); its answer is final
-whatever its length, a failure falls through. Right before the first other
+Instagram profile's posts (``src/providers/instagram.py``), a DOI or arXiv
+paper's open-access full text (``src/providers/scholarly.py``); its answer is final
+whatever its length, a failure falls through unless the reader sets
+``falls_through = False`` (the YouTube readers: the read then fails once the
+url-specific readers are spent). Right before the first other
 instance, read detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic)
 and extracts them with pypdf. Otherwise the first instance to return content
-``>= fallback_min_chars`` wins; thin/empty/error → next instance. It returns a
+``>= fallback_min_chars`` wins; thin/empty/error → next instance. A
+bot-challenge page or a paywall teaser (``src/content_guard.py``) never wins: the
+first is a failure, the second only a thin-fallback candidate. It returns a
 ``ReadOutcome``: the markdown
 plus the winning provider, the chain that was walked and every failure along the
 way tagged with a ``src.failure_reason`` category. If all fail, it raises
@@ -48,6 +53,7 @@ from loguru import logger
 
 from src import failure_reason
 from src.config_errors import ConfigError
+from src.content_guard import detect_block
 from src.pipeline_config import (
     INSTANCES,
     PAID_TYPES,
@@ -69,6 +75,7 @@ from src.providers.base import (
 from src.providers.pdf import NO_TEXT_LAYER_NOTICE, extract_pdf_text, looks_like_pdf
 from src.providers.registry import REGISTRY
 from src.providers.trafilatura import TrafilaturaRead, extract_markdown
+from src.quota import QuotaStore
 from src.rerank import JinaReranker
 from src.settings import Settings
 
@@ -105,9 +112,11 @@ class ReadOutcome:
     walked up to and including it (a url-specific reader enters it only for a
     url it accepts), and ``failures`` pairs every instance that did not deliver
     with its ``src.failure_reason`` category.
-    ``thin`` marks the last-resort branch: every instance came back under
-    ``fallback_min_chars`` and the longest of those scraps is what is being
-    returned.
+    ``thin`` marks the last-resort branch: no instance delivered a full page
+    (each came back under ``fallback_min_chars``, or as a paywall teaser of any
+    length) and the longest of those scraps is what is being returned.
+    ``teaser`` marks a thin answer that is a paywall teaser, so the model is
+    told it holds only the free part of the article, not just "short".
     """
 
     markdown: str
@@ -116,6 +125,7 @@ class ReadOutcome:
     failures: list[tuple[str, str]]  # (instance, reason constant)
     thin: bool
     elapsed_ms: int
+    teaser: bool = False
 
 
 @dataclass(slots=True)
@@ -125,7 +135,7 @@ class ReadItem:
     The search fields always carry the hit as the search returned it; the read
     fields are mutually exclusive — ``ok`` means ``markdown``, otherwise
     ``error`` (the message) and ``reason`` (a ``src.failure_reason`` constant,
-    for the caller to label). ``thin`` mirrors ``ReadOutcome.thin``.
+    for the caller to label). ``thin`` and ``teaser`` mirror ``ReadOutcome``.
     """
 
     title: str
@@ -136,6 +146,7 @@ class ReadItem:
     error: str | None = None
     reason: str | None = None
     thin: bool = False
+    teaser: bool = False
 
 
 @dataclass(slots=True)
@@ -341,6 +352,7 @@ class Pipeline:
         client: httpx.AsyncClient | None = None,
         paid_names: set[str] | frozenset[str] | None = None,
         reranker: JinaReranker | None = None,
+        quota: QuotaStore | None = None,
     ) -> None:
         self._settings = settings
         self._search = search_instances
@@ -351,12 +363,14 @@ class Pipeline:
         self._reranker = reranker
         # Names of the enabled instances whose TYPE bills per successful request.
         self._paid: frozenset[str] = frozenset(paid_names or ())
-        # Cumulative BILLED counters for this process: paid calls and total
-        # calls. They are in-memory and reset on restart; the per-request
-        # `paid_calls=` field in each log line lets the full history be
-        # re-aggregated from the log file across restarts.
-        self._cum_paid = 0
-        self._cum_calls = 0
+        # Per-instance quotas and the cumulative billed counters (src/quota.py).
+        # build() passes the persistent store; without one both live in memory.
+        self._quota = quota or QuotaStore(":memory:", {})
+        # Cumulative BILLED counters: paid calls and total calls. They are kept
+        # in the quota store and survive a restart — this loads the saved
+        # totals. The per-request `paid_calls=` field in each log line still
+        # lets the full history be re-aggregated from the log file.
+        self._cum_paid, self._cum_calls = self._quota.add_billed(0, 0)
         # Do NOT create clients eagerly: build() runs before the event loop
         # starts, and an httpx.AsyncClient created here would be bound to (and
         # later closed by) the wrong loop/lifespan. The manager creates them
@@ -436,7 +450,7 @@ class Pipeline:
                 "No search provider enabled. duckduckgo needs no config, so this "
                 "should not happen — check src/pipeline_config.py."
             )
-        # The url-specific readers (youtube, instagram-profile) are keyless and
+        # The url-specific readers (youtube, instagram-profile, scholarly) are keyless and
         # always enabled, so they do not count: an ordinary url needs a reader
         # that takes every url.
         if all(isinstance(p, UrlSpecificReader) for p in read_instances):
@@ -459,6 +473,10 @@ class Pipeline:
             paid_names.add(reranker.name)
             logger.info("Search rerank enabled (jina-reranker-v3.5)")
 
+        # Only the enabled instances' quotas: the store treats every other name
+        # as unlimited.
+        quotas = {i.name: i.quota for i in INSTANCES if i.quota is not None and i.name in built}
+
         return cls(  # type: ignore[arg-type]
             settings,
             search_instances,
@@ -466,10 +484,15 @@ class Pipeline:
             client=client,
             paid_names=paid_names,
             reranker=reranker,
+            quota=QuotaStore(settings.quota_db, quotas),
         )
 
     async def aclose(self) -> None:
-        """Close every per-proxy httpx client."""
+        """Close every per-proxy httpx client.
+
+        The quota store stays open: the server lifespan that calls this ends
+        with every MCP session, and the pipeline keeps serving the next one.
+        """
         await self._clients.aclose()
 
     @property
@@ -485,6 +508,7 @@ class Pipeline:
     def _account(self, billed: list[str]) -> tuple[int, float]:
         """Fold one request's billed upstream calls into the cumulative counters.
 
+        The counters live in the quota store, so they survive a restart.
         `billed` = names of provider instances whose upstream call returned data
         (a billed 200; thin read results count, raised/errored calls do not). A
         search instance that answered with ZERO hits is NOT billed either
@@ -498,8 +522,7 @@ class Pipeline:
         synchronously (no await), so it is safe under asyncio.gather concurrency.
         """
         paid = sum(1 for name in billed if name in self._paid)
-        self._cum_paid += paid
-        self._cum_calls += len(billed)
+        self._cum_paid, self._cum_calls = self._quota.add_billed(paid, len(billed))
         pct = (100.0 * self._cum_paid / self._cum_calls) if self._cum_calls else 0.0
         return paid, pct
 
@@ -527,13 +550,30 @@ class Pipeline:
             # and reason is its failure category (empty string when it worked).
             # Each provider uses the client bound to ITS proxy (None = direct).
             client = self._clients.client_for(provider.proxy)
+            # Book the call against the instance's quota BEFORE the network:
+            # the instances run concurrently, so only the reservation itself
+            # keeps them under the limit. A spent quota skips the instance
+            # without a request and reports it like the vendor's own 402.
+            slot = self._quota.reserve(provider.name)
+            if slot is None:
+                logger.info("search '{}' skipped: quota exhausted", provider.name)
+                return provider.name, None, failure_reason.NO_CREDITS
             try:
+                # Success keeps the slot, an empty answer included: the vendor
+                # counted the request either way.
                 hits = await provider.search(client, query, num_results, language)
                 return provider.name, hits, ""
             except ProviderError as exc:
+                # The vendor's own 402/429 spends the rest of the period; any
+                # other failure gives the slot back.
+                if exc.exhausts_quota:
+                    self._quota.mark_exhausted(slot)
+                else:
+                    self._quota.refund(slot)
                 logger.info("search '{}' failed: {}", provider.name, exc)
                 return provider.name, None, failure_reason.classify(exc)
             except Exception as exc:  # noqa: BLE001 — never break the merge
+                self._quota.refund(slot)
                 logger.warning("search '{}' crashed: {}", provider.name, exc)
                 return provider.name, None, failure_reason.classify(exc)
 
@@ -680,10 +720,14 @@ class Pipeline:
             )
 
         # One walk over the read pipeline. A url-specific reader (a YouTube
-        # video, an Instagram post or profile) is offered only the urls it
-        # accepts, ahead of the probe; its answer is final whatever its length,
-        # and any failure of it is recorded like any other provider's and falls
-        # through to the rest of the chain.
+        # video, an Instagram post or profile, a DOI or arXiv paper) is offered
+        # only the urls it accepts, ahead of the probe; its answer is final
+        # whatever its length, and any failure of it is recorded like any other
+        # provider's. The next
+        # url-specific readers are still tried; the generic chain is reached
+        # only if no failed reader set `falls_through = False` (the YouTube
+        # readers do: a generic reader gets the watch page chrome at best, a
+        # captcha page from a flagged IP), otherwise the read fails right there.
         #
         # One probe GET, run lazily once right before the first provider that is
         # not url-specific, decides the path. If it is a PDF, we are done; if it
@@ -695,39 +739,28 @@ class Pipeline:
         # defers to the read chain below (jina/tavily/firecrawl fetch server-side).
         #
         # A PDF with a text layer is done there. A PDF WITHOUT one is a scan:
-        # pypdf has nothing to give and used to return the notice as a success,
-        # which meant a scan never reached the read chain at all. Fall through
-        # instead, keeping the notice as the last resort if the chain also comes
-        # back empty (the behaviour callers had before).
+        # fall through to the read chain, keeping pypdf's notice as the last
+        # resort if the chain also comes back empty.
         #
-        # What the chain can actually do with a scan, precisely: jina, tavily,
-        # firecrawl and brightdata fetch the file server-side with their own
-        # parsers and may find text pypdf could not. crawl4ai also fetches on
-        # its own side, but it is a headless browser with no OCR, so on a scan
-        # it is as useless as trafilatura. And trafilatura, which runs FIRST, is
-        # an HTML-only extractor that always fails here — worse, probe_html is
-        # None on this branch, so it cannot reuse the probe body and re-downloads
-        # the whole file to our host before failing. That download is part of
-        # the price of this fall-through.
-        #
-        # jina's OCR tier is the strongest chance, but it has TWO gates: the url
-        # PATH must end in .pdf (_is_pdf_url in providers/jina.py) and jina must
-        # be running keyed (the whole ladder sits behind `if api_key`). So a
-        # keyless deployment never reaches OCR at all, and neither does a scan
-        # served from something like /download?id=123 — this branch also fires
-        # for PDFs recognised by Content-Type or %PDF magic alone. How often
-        # that shape of url occurs we have not counted. Widening the gate would
-        # mean passing the probe's verdict down into the provider, which the
-        # ReadProvider protocol has no room for today.
+        # On a scan, jina, tavily, firecrawl and brightdata fetch the file with
+        # their own parsers and may find text; crawl4ai (no OCR) and trafilatura
+        # (HTML-only, and with probe_html None it re-downloads the file) fail.
+        # jina's OCR tier needs both a url PATH ending in .pdf (_is_pdf_url in
+        # providers/jina.py) and an api key, so a keyless deployment or a scan
+        # recognised only by Content-Type / %PDF magic never reaches it; the
+        # ReadProvider protocol has no way to pass the probe's verdict down.
         probed = False
         probe_html: str | None = None
         pdf_notice: str | None = None
         best_thin: str | None = None
         best_thin_name: str | None = None
+        chain_closed = False
         for provider in self._read:
             specific = isinstance(provider, UrlSpecificReader)
             if specific and not provider.accepts(url):
                 continue
+            if not specific and chain_closed:
+                break
             if not specific and not probed:
                 probed = True
                 pdf_text, probe_html = await self._probe(
@@ -748,9 +781,21 @@ class Pipeline:
                         )
                     pdf_notice = pdf_text
             tried.append(provider.name)
+            # Same quota bookkeeping as in search: reserve before the network,
+            # skip a spent instance, refund a failure that is not the vendor's
+            # own 402/429. A thin answer keeps its slot — it was billed.
+            slot = self._quota.reserve(provider.name)
+            if slot is None:
+                errors.append(f"{provider.name}: quota exhausted for this period")
+                failures.append((provider.name, failure_reason.NO_CREDITS))
+                continue
             try:
                 content = await self._read_one(provider, url, probe_html)
             except Exception as exc:  # noqa: BLE001 — treat as provider failure
+                if isinstance(exc, ProviderError) and exc.exhausts_quota:
+                    self._quota.mark_exhausted(slot)
+                else:
+                    self._quota.refund(slot)
                 errors.append(str(exc) if isinstance(exc, ProviderError) else f"{provider.name}: {exc}")
                 failures.append((provider.name, failure_reason.classify(exc)))
                 if specific:
@@ -759,6 +804,8 @@ class Pipeline:
                     # youtube that flags our egress as a bot shows only in
                     # `tried=`.
                     logger.info("read url={} -> {} failed: {}", url, provider.name, exc)
+                    if not getattr(provider, "falls_through", True):
+                        chain_closed = True
                 continue
             # Returned without raising → a billed 200 (even if too thin). One
             # jina success may hide up to three extra billed upstream calls
@@ -768,8 +815,21 @@ class Pipeline:
             # suffix counts the extra billed calls. See _ESCALATIONS in
             # src/providers/jina.py for the current list of labels.
             billed.append(provider.name)
-            # A url-specific reader's answer is final whatever its length.
-            if specific or len(content) >= self._settings.fallback_min_chars:
+            # A generic reader can hand back a bot-challenge or a paywall teaser
+            # as if it were the article body. A url-specific reader's answer is
+            # final and is never screened. The 200 counts as billed either way.
+            # A challenge page holds nothing of the article: it fails this
+            # provider, is never served and is never kept as a thin fallback.
+            blocked = None if specific else detect_block(content)
+            teaser = blocked == failure_reason.ACCESS_DENIED
+            if blocked is not None and not teaser:
+                errors.append(f"{provider.name}: blocked page ({blocked})")
+                failures.append((provider.name, blocked))
+                continue
+            # A url-specific reader's answer is final whatever its length. A
+            # paywall teaser is never final, however long: a later reader may
+            # still have the full text.
+            if specific or (not teaser and len(content) >= self._settings.fallback_min_chars):
                 _log_ok(provider.name)
                 return ReadOutcome(
                     markdown=content,
@@ -779,12 +839,19 @@ class Pipeline:
                     thin=False,
                     elapsed_ms=_ms(),
                 )
-            # Too thin — remember the longest thin result as a last resort.
+            # Too thin, or a paywall teaser — remember the longest such result as
+            # a last resort. A teaser carries real partial text (the opening
+            # paragraphs before the subscription notice), so if no reader gets
+            # the full page it is served flagged as incomplete, not dropped.
             if best_thin is None or len(content) > len(best_thin):
                 best_thin = content
                 best_thin_name = provider.name
-            errors.append(f"{provider.name}: content too thin ({len(content)} chars)")
-            failures.append((provider.name, failure_reason.EMPTY))
+            if teaser:
+                errors.append(f"{provider.name}: paywall teaser ({len(content)} chars)")
+                failures.append((provider.name, failure_reason.ACCESS_DENIED))
+            else:
+                errors.append(f"{provider.name}: content too thin ({len(content)} chars)")
+                failures.append((provider.name, failure_reason.EMPTY))
 
         # A thin answer next to a provider that saw the site answer 404/410 is
         # the site's error page (crawl4ai converts it without a status), not a
@@ -799,6 +866,9 @@ class Pipeline:
                 failures=list(failures),
                 thin=True,
                 elapsed_ms=_ms(),
+                # The served scrap is a teaser when its own reader was the one
+                # that reported the paywall.
+                teaser=(best_thin_name, failure_reason.ACCESS_DENIED) in failures,
             )
         if pdf_notice:
             # Scanned PDF and nothing in the chain could read it either: hand
@@ -853,11 +923,13 @@ class Pipeline:
                     f"{provider.name}: no main content extracted", reason=failure_reason.EMPTY
                 )
             return content
-        if isinstance(provider, TrafilaturaRead):
-            # trafilatura is the only read provider that fetches the target url
-            # from OUR process, so it is the only one that needs the SSRF-guarded
-            # client. Every other read provider POSTs the url to its own API and
-            # never fetches it from here.
+        if isinstance(provider, TrafilaturaRead) or getattr(
+            provider, "fetches_target_locally", False
+        ):
+            # trafilatura and the readers that set `fetches_target_locally`
+            # (scholarly) fetch third-party urls from OUR process, so they need
+            # the SSRF-guarded client. Every other read provider sends the url
+            # to its own API or calls a fixed host, and never fetches it here.
             return await provider.read(self._clients.guarded_client_for(provider.proxy), url)
         return await provider.read(self._clients.client_for(provider.proxy), url)
 
@@ -873,7 +945,7 @@ class Pipeline:
 
         A TLS certificate-verification failure triggers ONE retry without
         verification (some legitimate hosts ship a broken chain). The probe never
-        hard-fails anymore — a failed fetch always defers to the provider chain,
+        hard-fails — a failed fetch always defers to the provider chain,
         and a body that looks like a PDF but fails to parse ALSO defers to the
         provider chain instead of raising.
         """
@@ -982,6 +1054,7 @@ class Pipeline:
                         ok=True,
                         markdown=read.markdown,
                         thin=read.thin,
+                        teaser=read.teaser,
                     )
             return ReadItem(
                 title=hit.title,

@@ -2,8 +2,9 @@
 # Values below are PLACEHOLDERS (XXX), not real secrets.
 #
 # WEB-SERVICE variant (published via Traefik + basicAuth). Auth is enforced by
-# Traefik, not the app. The only persistent state is the log file under
-# /app/data, kept on a named volume so it survives restarts and image updates.
+# Traefik, not the app. The only persistent state is the log file and the quota
+# store (data/quota.sqlite3) under /app/data, kept on a named volume so it
+# survives restarts and image updates.
 #
 # Provider instances are enabled by which env vars are set. Every var below is
 # OPTIONAL: duckduckgo (search) and trafilatura (read) need no configuration, so
@@ -24,13 +25,15 @@ services:
     container_name: research-mcp
     restart: always
     volumes:
-      - research_mcp_data:/app/data    # persistent log file survives restart/update
+      - research_mcp_data:/app/data    # persistent log + quota store survive restart/update
     environment:
       # --- search (need >= 1) ---
       SEARXNG_URL: XXX            # e.g. http://searxng:8080
       BRAVE_API_KEY: XXX         # optional (Brave Search API subscription token)
       SERPER_API_KEY: XXX        # optional
       EXA_API_KEY: XXX           # optional
+      OPENALEX_API_KEY: XXX      # optional: scholarly papers (free key, openalex.org/settings/api)
+      SEMANTIC_SCHOLAR_API_KEY: XXX  # optional: scholarly papers (free key, 1 request/second)
       # --- read (trafilatura is always on; these are optional extras) ---
       JINA_API_KEY: XXX          # optional (Jina works keyless too)
       CRAWL4AI_URL: XXX          # optional, e.g. http://crawl4ai:11235
@@ -39,6 +42,8 @@ services:
       TAVILY_2_API_KEY: XXX      # optional (failover)
       FIRECRAWL_API_KEY: XXX     # optional
       GROQ_API_KEY: XXX          # optional: Instagram video transcripts (Groq Whisper)
+      SUPADATA_API_KEY: XXX      # optional: paid fallback for YouTube transcripts (Supadata)
+      UNPAYWALL_EMAIL: XXX       # optional: OA full text for DOI links (your email); arXiv links need nothing
       # --- per-instance proxy (optional, SOCKS5/HTTP; for clean egress) ---
       # EXA_PROXY: socks5://proxy.invalid:1080
       # BRAVE_PROXY: socks5://proxy.invalid:1080
@@ -47,7 +52,11 @@ services:
       # TAVILY_1_PROXY: socks5://proxy.invalid:1080
       # TAVILY_2_PROXY: socks5://proxy.invalid:1080
       # FIRECRAWL_PROXY: socks5://proxy.invalid:1080
+      # OPENALEX_PROXY: socks5://proxy.invalid:1080
+      # SEMANTIC_SCHOLAR_PROXY: socks5://proxy.invalid:1080
       # YOUTUBE_PROXY: socks5://proxy.invalid:1080   # YouTube transcripts; required where youtube.com is blocked
+      # SUPADATA_PROXY: socks5://proxy.invalid:1080  # Supadata YouTube transcripts
+      # SCHOLARLY_PROXY: socks5://proxy.invalid:1080 # DOI/arXiv OA full text (arxiv.org, Unpaywall, Europe PMC)
       # INSTAGRAM_PROXY: socks5://proxy.invalid:1080 # Instagram transcripts; required where instagram.com is blocked
       # GROQ_PROXY: socks5://proxy.invalid:1080      # Groq Whisper; required where Groq answers "Forbidden"
       TZ: Europe/Moscow

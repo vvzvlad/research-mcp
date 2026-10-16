@@ -1,6 +1,6 @@
 """Tavily Search API provider (paid, LLM-oriented search index).
 
-API (contract read 2026-09-18 from docs.tavily.com → API Reference → Search):
+API (per docs.tavily.com → API Reference → Search):
 POST ``https://api.tavily.com/search`` with headers ``Authorization: Bearer
 {key}`` and ``Content-Type: application/json``, JSON body — ``query``
 (required), ``max_results`` (default 10, documented range 0..20), ``search_depth``
@@ -74,10 +74,8 @@ class TavilySearch:
         if _CYRILLIC_RE.search(query):
             # `country` goes out ONLY for cyrillic queries, and only as "russia".
             #
-            # This is a measured heuristic, not a hunch: «АИРЕ63 однофазный
-            # двигатель» without `country` returns foreign parts aggregators,
-            # while the same query with country="russia" returns specialised
-            # Russian shops — 6 of 6 hits.
+            # Measured: «АИРЕ63 однофазный двигатель» without `country` returns
+            # foreign parts aggregators, with country="russia" Russian shops.
             #
             # Tavily honours `country` only when `topic` is "general". This body
             # never sends `topic`, and Tavily's default for it is "general", so
@@ -100,6 +98,8 @@ class TavilySearch:
             # request racing its own rate-limit window.
             retries=self._config.retries,
             provider=self.name,
+            # Tavily signals a spent monthly plan with the non-standard HTTP 432.
+            out_of_credits_statuses=frozenset({432}),
         )
         try:
             data = response.json()

@@ -1,7 +1,6 @@
 """Jina Search (s.jina.ai) provider.
 
-API (verified 2026-08-18 from https://docs.jina.ai/ and
-https://api.jina.ai/docs): POST ``https://s.jina.ai/`` with ``Authorization:
+API (per https://docs.jina.ai/ and https://api.jina.ai/docs): POST ``https://s.jina.ai/`` with ``Authorization:
 Bearer <key>`` — the key is REQUIRED here (unlike the r.jina.ai reader,
 keyless access to the search endpoint is blocked) — plus ``Content-Type:
 application/json``, ``Accept: application/json`` and ``X-Respond-With:
@@ -32,9 +31,8 @@ from src.providers.registry import register
 
 JINA_SEARCH_ENDPOINT = "https://s.jina.ai/"
 
-# No documented ceiling for `num` (checked 2026-08-18); clamped to the tool's
-# own num_results cap for symmetry with brave/exa, so a future server-side
-# change cannot push an unvalidated value upstream.
+# No documented ceiling for `num`; clamped to the tool's own num_results cap
+# for symmetry with brave/exa, so no unvalidated value goes upstream.
 JINA_SEARCH_NUM_MAX = 50
 
 

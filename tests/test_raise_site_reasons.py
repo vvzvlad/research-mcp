@@ -1,8 +1,7 @@
 """The failure category each read provider sets where it raises.
 
-The category is no longer read back from the message text, so a lost
-``reason=`` would silently turn into ``other``; these tests pin the read-side
-raise sites the old wording table used to cover.
+The category is never read back from the message text, so a lost ``reason=``
+would silently turn into ``other``; these tests pin the read-side raise sites.
 """
 
 from __future__ import annotations

@@ -1,10 +1,10 @@
 """Linkup Search API provider (own index + optional agentic retrieval).
 
-API (contract read 2026-09-18 from the official reference,
+API (per the official reference,
 https://docs.linkup.so/pages/documentation/api-reference/endpoint/post-search,
 with depth semantics and prices from
 https://docs.linkup.so/pages/documentation/get-started/concepts — NOT verified
-against a live call, we hold no key yet): POST
+against a live call): POST
 ``https://api.linkup.so/v1/search`` with ``Authorization: Bearer <key>``
 (security scheme ``bearer``) and a JSON body whose REQUIRED fields are ``q``,
 ``depth`` and ``outputType``.
@@ -28,7 +28,7 @@ item only ``name`` / ``url`` / ``type: "image"``. So the TITLE is ``name`` (not
 ``title``) and the snippet is ``content`` — unlike brave's ``description`` or
 serper's ``snippet``. An empty ``results`` list is a normal empty answer.
 
-Pricing (2026-09-18): ``searchResults`` costs $0.005 per call at ``flash``,
+Pricing: ``searchResults`` costs $0.005 per call at ``flash``,
 ``fast`` and ``standard`` alike, and $0.05 at ``deep`` — ten times more. Hence
 the default depth below is the cheapest tier, taking ``flash`` within it because
 it is also the fastest and the pipeline awaits every search provider.

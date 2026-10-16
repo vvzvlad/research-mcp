@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.quota import Quota
+
 
 @dataclass(frozen=True, slots=True)
 class Instance:
@@ -31,6 +33,8 @@ class Instance:
     ``options_env`` pairs an option key with the ENV VARIABLE NAME holding its
     value; always optional — each var that is set lands in
     ``ProviderConfig.options`` under its key, an unset one is simply left out.
+    ``quota`` (optional) caps the instance's calls per period in the persistent
+    quota store (``src/quota.py``), keyed by instance name; None → unlimited.
     ``disabled_by_env`` names a var which, set to a non-empty value, switches the
     instance off (empty counts as unset, like every var here) — for an instance
     that steps aside when another one covers the same upstream.
@@ -44,6 +48,7 @@ class Instance:
     proxy_env: str | None = None
     optional_api_key: bool = False
     options_env: tuple[tuple[str, str], ...] = ()
+    quota: Quota | None = None
     disabled_by_env: str | None = None
 
 
@@ -61,18 +66,24 @@ INSTANCES: list[Instance] = [
     Instance("searxng", "searxng", url_env="SEARXNG_URL"),
     # No key, no url: the search half of the zero-config floor (the trafilatura
     # of searching), which is what keeps `Pipeline.build` working on a
-    # completely empty environment — before it, "free minimum" meant "first
-    # deploy a SearXNG". It scrapes the no-JS SERP, so it is free but fragile.
+    # completely empty environment. It scrapes the no-JS SERP, so it is free but
+    # fragile.
     #
     # It steps aside when SEARXNG_URL is set: our SearXNG queries the very same
     # html.duckduckgo.com endpoint from the same egress IP (DuckDuckGo is the only
-    # engine it still has), so running both only doubles the requests DuckDuckGo
-    # sees per search. DuckDuckGo already answers SearXNG with CAPTCHAs many times
-    # a day (searxng log, 2026-10-04); a second concurrent hit only adds to that.
+    # engine it still has), and DuckDuckGo already answers it with CAPTCHAs many
+    # times a day — a second concurrent query per search only adds to that.
     Instance("duckduckgo", "duckduckgo", disabled_by_env="SEARXNG_URL"),
-    # Brave reaches its API fine from this host directly (verified 2026-08-09);
-    # the proxy var exists only for symmetry with the other external instances.
-    Instance("brave", "brave", api_key_env="BRAVE_API_KEY", proxy_env="BRAVE_PROXY"),
+    # Brave reaches its API directly from this host; the proxy var exists only
+    # for symmetry with the other external instances.
+    # The free plan grants 2000 queries a month (see src/providers/brave.py).
+    Instance(
+        "brave",
+        "brave",
+        api_key_env="BRAVE_API_KEY",
+        proxy_env="BRAVE_PROXY",
+        quota=Quota(2000, "monthly"),
+    ),
     # Reuses the same key (and the same token pool) as the jina reader below.
     # Unlike the reader, s.jina.ai refuses keyless access, so the key is
     # REQUIRED here — no optional_api_key — and the instance simply
@@ -81,19 +92,16 @@ INSTANCES: list[Instance] = [
     # Tavily and Firecrawl sell search and extract off ONE key, so these two
     # need no new secret and light up the moment the reader key is present.
     #
-    # They are NOT free, though: the key has ONE monthly pool, shared by both
-    # products. Measured on our own Tavily key 2026-09-18: plan_usage 12 =
-    # search 4 + extract 8, against plan_limit 1000. Search runs on every
-    # web_search while the tavily/firecrawl READERS sit 4th and 6th in the read
-    # chain and win ~1% of reads (19-27 calls a month), so search will be what
-    # empties the pool — and when it does, those readers start failing too and
-    # drop out of the chain. Firecrawl says so with a 402 (seen in our own logs);
-    # what status Tavily uses is NOT verified — its docs do not publish one, so
-    # do not grep for a specific code there, and note that _CREDIT_MARKERS may
-    # or may not match its wording. That trade is deliberate: the readers we
-    # lose are worth far less than the search we gain, and the chain has five
-    # other readers. But it is a trade, not a free lunch, and it cannot be
-    # turned off per-product — pulling the key disables the reader as well.
+    # They are NOT free: the key has ONE monthly pool shared by both products.
+    # Search runs on every web_search while these readers win few reads, so
+    # search is what empties the pool, and then the readers fail too. Firecrawl
+    # signals it with a 402; Tavily's status is undocumented, and _CREDIT_MARKERS
+    # may not match its wording. It cannot be turned off per product — pulling
+    # the key disables the reader as well.
+    #
+    # The pool is 1000 calls a month; these readers sit 4th and 6th in the read
+    # chain and win ~1% of reads (19-27 a month). Losing them when search drains
+    # the pool is a deliberate trade: the chain has five other readers.
     Instance(
         "tavily-search", "tavily_search", api_key_env="TAVILY_1_API_KEY", proxy_env="TAVILY_1_PROXY"
     ),
@@ -122,13 +130,28 @@ INSTANCES: list[Instance] = [
     Instance("youcom", "youcom_search", api_key_env="YOUCOM_API_KEY", proxy_env="YOUCOM_PROXY"),
     Instance("serper", "serper", api_key_env="SERPER_API_KEY", proxy_env="SERPER_PROXY"),
     Instance("exa", "exa", api_key_env="EXA_API_KEY", proxy_env="EXA_PROXY"),
+    # Scholarly indexes: papers mixed into every web_search. Free with a key;
+    # keyless is no option (OpenAlex allows ~100 searches a day without one,
+    # Semantic Scholar answers 429 from the first request), so no key, no instance.
+    Instance(
+        "openalex", "openalex_search", api_key_env="OPENALEX_API_KEY", proxy_env="OPENALEX_PROXY"
+    ),
+    Instance(
+        "semantic-scholar",
+        "semantic_scholar_search",
+        api_key_env="SEMANTIC_SCHOLAR_API_KEY",
+        proxy_env="SEMANTIC_SCHOLAR_PROXY",
+    ),
     # --- read ---
     # The url-specific readers: each serves only the urls it accepts, ahead of
     # the probe. Their hosts are fixed, so they fetch with the plain client bound
-    # to their proxy, not the SSRF-guarded one.
+    # to their proxy, not the SSRF-guarded one — except scholarly, which fetches
+    # the third-party urls Unpaywall names and so gets the guarded client.
     # YouTube transcripts need no key. Some hosts (prod among them) cannot reach
     # youtube.com directly, or are flagged by it as a bot — hence the proxy.
     Instance("youtube", "youtube", proxy_env="YOUTUBE_PROXY"),
+    # Paid fallback for YouTube transcripts when YouTube bot-walls our IP; native captions only.
+    Instance("supadata", "supadata", api_key_env="SUPADATA_API_KEY", proxy_env="SUPADATA_PROXY"),
     # Instagram post transcripts: Groq Whisper transcribes the audio, so the key
     # is Groq's and no key means no instance. Two upstreams, two proxies:
     # INSTAGRAM_PROXY for instagram.com where Instagram is blocked, GROQ_PROXY
@@ -142,6 +165,13 @@ INSTANCES: list[Instance] = [
     ),
     # An Instagram profile's posts need no key; same instagram.com proxy.
     Instance("instagram-profile", "instagram_profile", proxy_env="INSTAGRAM_PROXY"),
+    # Free OA full-text resolution for DOI/arXiv links via Unpaywall + Europe PMC + arXiv.
+    Instance(
+        "scholarly",
+        "scholarly",
+        proxy_env="SCHOLARLY_PROXY",
+        options_env=(("unpaywall_email", "UNPAYWALL_EMAIL"),),
+    ),
     Instance("trafilatura", "trafilatura"),
     # jina works keyless (lower rate limit); the key is optional.
     Instance(
@@ -172,13 +202,13 @@ INSTANCES: list[Instance] = [
 # source. Cost scales with how many instances are ENABLED, not with position —
 # so enabling all of them means paying all of them on every single query.
 #
-# Order: proven and free first (searxng self-hosted, then keyless duckduckgo,
-# then brave's 2000/month), then tavily-search and firecrawl-search — no new
-# secret, but NOT free: they spend the same monthly pool as their own readers,
-# see the instance comment above. Then the proven paid workhorse jina-search at
-# ~$0.0005/query, then the vendors we have no key for yet, cheapest first
-# (xmlriver ~$0.0003 on the Yandex index, parallel and octen at $1/1k, linkup
-# and youcom at $5/1k), then serper, then exa at $7/1k.
+# Order: free first (searxng self-hosted, keyless duckduckgo, brave's
+# 2000/month), then tavily-search and firecrawl-search (they spend their
+# readers' monthly pool, see above), then jina-search (~$0.0005/query), then
+# the rest cheapest first (xmlriver ~$0.0003 on the Yandex index, parallel and
+# octen at $1/1k, linkup and youcom at $5/1k), then serper, then exa at $7/1k.
+# The free scholarly indexes (openalex, semantic-scholar) close the list: they
+# add papers, and a paper url a web engine also returned keeps the web copy.
 #
 # searxng and duckduckgo never run together (duckduckgo steps aside when
 # SEARXNG_URL is set, see its instance), so whichever of the two is enabled
@@ -197,6 +227,8 @@ SEARCH_PIPELINE: list[str] = [
     "youcom",
     "serper",
     "exa",
+    "openalex",
+    "semantic-scholar",
 ]
 # Read is sequential and stops at the first sufficient answer, so here the order
 # IS a cost gate: brightdata sits last because it is the only one that bills for
@@ -204,8 +236,10 @@ SEARCH_PIPELINE: list[str] = [
 # they run before the probe, on the urls they accept only.
 READ_PIPELINE: list[str] = [
     "youtube",
+    "supadata",
     "instagram",
     "instagram-profile",
+    "scholarly",
     "trafilatura",
     "jina",
     "crawl4ai",
@@ -222,7 +256,8 @@ READ_PIPELINE: list[str] = [
 # paid. brave is metered too: the free plan grants a 2000-queries-per-month quota
 # and answers 429 once it is spent (there is no overage on it); the paid plans
 # are billed separately. It is listed here because the accounting tracks metered
-# external calls, not invoices.
+# external calls, not invoices. openalex_search likewise: every search is charged
+# against the key's free daily budget. semantic_scholar_search is only rate-limited.
 PAID_TYPES: frozenset[str] = frozenset(
     {
         "brave",
@@ -241,5 +276,7 @@ PAID_TYPES: frozenset[str] = frozenset(
         "youcom_search",
         "brightdata",
         "instagram",  # Groq bills every transcription
+        "supadata",  # 1 credit per native transcript; Supadata also bills a 206 this does not count
+        "openalex_search",
     }
 )

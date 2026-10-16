@@ -14,6 +14,7 @@ import httpx
 import pytest
 import respx
 
+from src import failure_reason
 from src.providers.base import ProviderError
 from src.providers.tavily_search import (
     TAVILY_CYRILLIC_COUNTRY,
@@ -200,6 +201,23 @@ async def test_out_of_credits_is_a_provider_error_without_retry(make_config):
             await provider.search(client, "q", 5, None)
     assert "out of credits" in str(excinfo.value)
     assert route.call_count == 1  # 402 fails over, it does not retry
+
+
+@respx.mock
+async def test_http_432_is_out_of_credits_not_a_client_error(make_config):
+    # Tavily answers a spent monthly plan with the non-standard HTTP 432; the
+    # provider opts that status into the shared out-of-credits branch.
+    route = respx.post(TAVILY_SEARCH_ENDPOINT).mock(
+        return_value=httpx.Response(432, text="plan exhausted")
+    )
+    provider = TavilySearch(make_config("tavily_search", api_key="k"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.search(client, "q", 5, None)
+    assert "out of credits (HTTP 432)" in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.NO_CREDITS
+    assert excinfo.value.exhausts_quota is True
+    assert route.call_count == 1  # 432 fails over, it does not retry
 
 
 @respx.mock

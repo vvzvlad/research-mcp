@@ -10,9 +10,10 @@ import pytest
 import respx
 
 from src import failure_reason
-from src.pipeline import Pipeline
+from src.pipeline import Pipeline, ReadFailed
 from src.providers import _url_guard
 from src.providers.base import ProviderError
+from src.providers.supadata import TRANSCRIPT_ENDPOINT
 from src.providers.youtube import PLAYER_ENDPOINT, fetch_transcript, video_id
 from tests.conftest import _clear_provider_env, _jina_answer
 
@@ -358,30 +359,68 @@ async def test_read_youtube_routes_via_youtube_proxy(monkeypatch, settings):
 
 
 @respx.mock
-async def test_read_youtube_video_without_captions_falls_through(
+async def test_read_youtube_video_without_captions_fails_without_the_generic_chain(
     monkeypatch, settings, capture_logs
 ):
+    # A generic reader would get only the watch page chrome, so the read fails
+    # on youtube's reason and the probe and the read chain never run.
     _clear_provider_env(monkeypatch)
     _public_dns(monkeypatch)
     url = f"https://www.youtube.com/watch?v={VIDEO}"
     respx.post(PLAYER_ENDPOINT).mock(return_value=httpx.Response(200, json=_player(None)))
-    # The watch page itself is only chrome: trafilatura finds nothing, jina wins.
-    respx.get(url).mock(
+    probe = respx.get(url).mock(
         return_value=httpx.Response(200, text="<html><body><div id='app'></div></body></html>")
     )
     jina_md = "# Test Video\n\n" + ("Video page content. " * 40)
-    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(jina_md))
+    jina = respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(jina_md))
 
     pipe = Pipeline.build(settings)
     try:
-        outcome = await pipe.read(url)
+        with pytest.raises(ReadFailed) as caught:
+            await pipe.read(url)
     finally:
         await pipe.aclose()
 
-    assert outcome.provider == "jina"
-    assert outcome.tried == ["youtube", "trafilatura", "jina"]
-    assert outcome.failures[0] == ("youtube", "empty")
-    # The url-specific reader's failure gets its own log line; trafilatura's,
-    # an ordinary reader in the chain, does not.
+    assert caught.value.tried == ["youtube"]
+    assert caught.value.failures == [("youtube", failure_reason.EMPTY)]
+    assert probe.call_count == 0
+    assert jina.call_count == 0
+    # The url-specific reader's failure gets its own log line.
     assert sum(f"read url={url} -> youtube failed:" in m for m in capture_logs) == 1
-    assert not any("-> trafilatura failed:" in m for m in capture_logs)
+
+
+@respx.mock
+async def test_read_youtube_bot_walled_and_supadata_failing_fails_without_the_generic_chain(
+    monkeypatch, settings
+):
+    # From a flagged IP a generic reader gets Google's captcha page: when both
+    # YouTube readers fail, the read fails on their reasons right there.
+    _clear_provider_env(monkeypatch)
+    _public_dns(monkeypatch)
+    monkeypatch.setenv("SUPADATA_API_KEY", "k")
+    url = f"https://www.youtube.com/watch?v={VIDEO}"
+    bot_wall = _player(
+        None, status="LOGIN_REQUIRED", reason="Sign in to confirm you’re not a bot"
+    )
+    respx.post(PLAYER_ENDPOINT).mock(return_value=httpx.Response(200, json=bot_wall))
+    supadata = respx.get(TRANSCRIPT_ENDPOINT).mock(return_value=httpx.Response(206))
+    probe = respx.get(url).mock(return_value=httpx.Response(200, text="<html></html>"))
+    jina = respx.get(f"https://r.jina.ai/{url}").mock(
+        return_value=_jina_answer("Our systems have detected unusual traffic. " * 40)
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ReadFailed) as caught:
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert caught.value.tried == ["youtube", "supadata"]
+    assert caught.value.failures == [
+        ("youtube", failure_reason.BOT_PROTECTION),
+        ("supadata", failure_reason.EMPTY),
+    ]
+    assert supadata.call_count == 1
+    assert probe.call_count == 0
+    assert jina.call_count == 0

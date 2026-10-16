@@ -2,9 +2,8 @@
 
 Serper answers an empty account with HTTP 400
 ``{"message":"Not enough credits","statusCode":400}`` rather than the
-conventional 402 (verified live 2026-09-18: ``GET /account`` returns
-``balance: 0`` while every search returns that 400). For months this surfaced as
-``client error (HTTP 400)`` — an unpaid account that reads like a broken API.
+conventional 402. Without the classification it reads as
+``client error (HTTP 400)`` — an unpaid account that looks like a broken API.
 
 These tests pin the classification and, just as importantly, that it stays a
 single non-retried attempt: a billing state must fail over immediately, exactly
@@ -127,12 +126,13 @@ async def test_plain_402_still_reports_out_of_credits():
 
 
 @respx.mock
-async def test_429_stays_rate_limited_even_when_the_body_mentions_credits():
+async def test_429_is_rate_limited_unless_the_body_names_a_spent_balance():
     # Rate limiting and an empty balance are different operational problems:
-    # one clears by itself, the other needs a payment. 429 must keep its own
-    # wording whatever the body says.
+    # one clears by itself, the other needs a payment.
     route = respx.get(URL).mock(
-        return_value=httpx.Response(429, json={"message": "Not enough credits"})
+        return_value=httpx.Response(
+            429, json={"details": "Request rate limit on current plan was exceeded."}
+        )
     )
 
     with pytest.raises(ProviderError) as excinfo:
@@ -140,6 +140,23 @@ async def test_429_stays_rate_limited_even_when_the_body_mentions_credits():
 
     assert "rate limited (HTTP 429)" in str(excinfo.value)
     assert excinfo.value.reason == failure_reason.RATE_LIMIT
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_429_with_a_spent_plan_quota_is_out_of_credits():
+    # Supadata answers a used-up monthly quota with 429, not 402.
+    route = respx.get(URL).mock(
+        return_value=httpx.Response(
+            429, json={"error": "limit-exceeded", "details": "Plan usage limit was exceeded."}
+        )
+    )
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _call()
+
+    assert "out of credits (HTTP 429)" in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.NO_CREDITS
     assert route.call_count == 1
 
 
@@ -163,6 +180,43 @@ async def test_plain_4xx_reason(status, expected):
     assert f"client error (HTTP {status})" in str(excinfo.value)
     assert excinfo.value.status == status
     assert excinfo.value.reason == expected
+
+
+@respx.mock
+async def test_extra_out_of_credits_status_is_reported_as_out_of_credits():
+    # A provider (Tavily) names HTTP 432 as its spent-plan signal via
+    # out_of_credits_statuses: it must read as out-of-credits, exhaust the quota,
+    # and not retry — exactly like 402.
+    route = respx.get(URL).mock(return_value=httpx.Response(432, text="plan exhausted"))
+
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await request_with_retry(
+                client,
+                "GET",
+                URL,
+                retries=1,
+                provider="probe",
+                out_of_credits_statuses=frozenset({432}),
+            )
+
+    assert "out of credits (HTTP 432)" in str(excinfo.value)
+    assert excinfo.value.reason == failure_reason.NO_CREDITS
+    assert excinfo.value.exhausts_quota is True
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_432_without_the_opt_in_is_a_plain_client_error():
+    # 432 is reached ONLY via out_of_credits_statuses; a provider that does not
+    # opt in still sees it as an ordinary client error.
+    respx.get(URL).mock(return_value=httpx.Response(432, text="nope"))
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _call()
+
+    assert "client error (HTTP 432)" in str(excinfo.value)
+    assert "out of credits" not in str(excinfo.value)
 
 
 @respx.mock

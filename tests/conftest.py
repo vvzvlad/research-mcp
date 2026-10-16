@@ -1,6 +1,6 @@
 """Shared pytest fixtures.
 
-Settings now has only defaulted fields, so importing it needs no ENV. Provider
+Settings has only defaulted fields, so importing it needs no ENV. Provider
 instances are selected by the ENV var NAMES in pipeline_config; tests set those
 vars explicitly (usually via monkeypatch) to choose which instances are enabled.
 """
@@ -51,13 +51,21 @@ _PROVIDER_ENV_VARS = (
     "LINKUP_PROXY",
     "YOUCOM_API_KEY",
     "YOUCOM_PROXY",
+    "OPENALEX_API_KEY",
+    "OPENALEX_PROXY",
+    "SEMANTIC_SCHOLAR_API_KEY",
+    "SEMANTIC_SCHOLAR_PROXY",
     "BRIGHTDATA_API_KEY",
     "BRIGHTDATA_ZONE",
     "BRIGHTDATA_PROXY",
     "YOUTUBE_PROXY",
+    "SUPADATA_API_KEY",
+    "SUPADATA_PROXY",
     "GROQ_API_KEY",
     "GROQ_PROXY",
     "INSTAGRAM_PROXY",
+    "UNPAYWALL_EMAIL",
+    "SCHOLARLY_PROXY",
 )
 
 
@@ -67,8 +75,7 @@ def _drop_shell_no_proxy(monkeypatch) -> None:
 
     httpx reads NO_PROXY whenever a client is built, and httpx 0.28.1 cannot
     parse an IPv6 CIDR entry in it (``fd00::/8`` → ``InvalidURL: Invalid port:
-    ':'``): every client construction fails, and with it ~400 tests. Measured
-    2026-10-04 on a shell exporting such a NO_PROXY; CI has none, so it was green.
+    ':'``): every client construction fails, and with it most of the suite.
     """
     monkeypatch.delenv("NO_PROXY", raising=False)
     monkeypatch.delenv("no_proxy", raising=False)
@@ -103,7 +110,7 @@ def _jina_answer(
 ) -> httpx.Response:
     """A Jina Reader answer in the JSON envelope ``Accept: application/json`` gets.
 
-    The shape measured live 2026-10-04: HTTP 200 whatever the site said, the
+    The shape measured live: HTTP 200 whatever the site said, the
     Markdown in ``data.content``, the target site's status in
     ``data.httpStatus``, and ``data.warning`` only when jina has one.
     """
@@ -116,6 +123,18 @@ def _jina_answer(
     if warning is not None:
         data["warning"] = warning
     return httpx.Response(200, json={"code": 200, "status": 20000, "data": data, "meta": {}})
+
+
+@pytest.fixture(autouse=True)
+def _isolated_quota_db(monkeypatch, tmp_path):
+    """Give every test its own quota store file instead of the repo's data/.
+
+    ``Pipeline.build`` opens ``settings.quota_db``, which persists across runs:
+    without this, tests would write into data/ and the cumulative counters they
+    assert on would depend on test order. Settings reads os.environ even with
+    ``_env_file=None``, and an autouse fixture runs before ``settings``.
+    """
+    monkeypatch.setenv("QUOTA_DB", str(tmp_path / "quota.sqlite3"))
 
 
 @pytest.fixture

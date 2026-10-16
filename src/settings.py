@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     # loguru rotation/retention for the file sink (size trigger, age cutoff).
     log_rotation: str = "20 MB"
     log_retention: str = "14 days"
+    # Persistent quota store (SQLite, src/quota.py): per-instance usage and the
+    # cumulative billed counters. Under data/ like the log file, so it survives
+    # restarts/image updates via the mounted volume.
+    quota_db: str = "data/quota.sqlite3"
     # httpx request timeout in seconds for all outbound HTTP calls.
     request_timeout: float = 25.0
     # Read content shorter than this is "thin" → try the next read provider.

@@ -25,19 +25,31 @@ class ProviderError(Exception):
     Raised on hard failures (HTTP errors, empty/too-thin content, exhausted
     credits). The pipeline catches it and moves on to the next instance.
     ``status`` is set only by ``request_with_retry``'s plain-4xx branch (not
-    402/429, not a credit-exhaustion 4xx, not 5xx) and is ``None`` otherwise —
+    402/429, not a credit-exhaustion 4xx, not a provider-declared out-of-credits
+    status, not 5xx) and is ``None`` otherwise —
     enough for a caller to tell "the site said 404" from other errors.
     ``reason`` is the failure category (a ``src.failure_reason`` constant), set
     by the raise site, which is the only place that knows it. ``None`` means
     "let ``classify()`` look at the exception chain, else ``other``".
+    ``exhausts_quota`` is set only by ``request_with_retry``, on any 402/429, any
+    status the provider passes in ``out_of_credits_statuses``, or a 4xx whose
+    body reports an exhausted balance - for a provider
+    that calls its own API that is the vendor's balance; the pipeline acts on it
+    only for instances with a declared quota, blocking that quota for the rest
+    of the period.
     """
 
     def __init__(
-        self, message: str, status: int | None = None, reason: str | None = None
+        self,
+        message: str,
+        status: int | None = None,
+        reason: str | None = None,
+        exhausts_quota: bool = False,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.reason = reason
+        self.exhausts_quota = exhausts_quota
 
 
 @dataclass(slots=True)
@@ -115,7 +127,12 @@ class UrlSpecificReader(ReadProvider, Protocol):
     """A reader that serves only some urls (a YouTube video, an Instagram post).
 
     The pipeline offers it only the urls it ``accepts``, BEFORE the probe, and
-    its answer is final whatever its length.
+    its answer is final whatever its length. A class attribute ``falls_through``
+    (read with a ``True`` default) says whether its failure passes the url on to
+    the generic readers or fails the read once the url-specific readers are spent.
+    An optional class attribute ``fetches_target_locally`` (read with a ``False``
+    default) marks a reader that GETs third-party urls from our own process, so
+    the pipeline hands it the SSRF-guarded client instead of the plain one.
     """
 
     def accepts(self, url: str) -> bool:

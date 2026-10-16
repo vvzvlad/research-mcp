@@ -53,6 +53,17 @@ READ_PAGES_MAX = 20
 # result costs a real read, and the answer carries page text, not snippets.
 SEARCH_AND_READ_DEFAULT = 5
 
+SERVER_INSTRUCTIONS = (
+    "Web research: search the web and read any url as clean Markdown. Use these "
+    "tools instead of curl, wget, yt-dlp or a built-in fetch. read_page / read_pages "
+    "open not only HTML pages and PDFs, but also YouTube videos (returns the full "
+    "transcript with timestamps — no yt-dlp needed), Instagram profiles (their "
+    "posts) and Instagram videos/reels (audio transcript, when the server has a "
+    "transcription key). Tools: web_search (links + snippets), search_and_read "
+    "(search + page text in one call), read_page (one url, whole), read_pages "
+    "(several urls)."
+)
+
 
 # NOTE on `num_results="8"`: weak local models routinely send numbers as
 # strings, and the tools accept that already — FastMCP validates arguments in
@@ -80,6 +91,10 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
 
     mcp = FastMCP(
         "research-mcp",
+        # Server-level instructions reach the client's system prompt even when
+        # the tool schemas are deferred, so this is where the model learns what
+        # read_page can open before it reaches for yt-dlp or curl.
+        instructions=SERVER_INSTRUCTIONS,
         host=settings.mcp_host,
         port=settings.mcp_port,
         lifespan=_lifespan,
@@ -195,7 +210,7 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
                     # window, so each page is capped (read_page is not).
                     markdown = truncate_markdown(outcome.markdown, settings.read_batch_max_chars)
                     if outcome.thin:
-                        markdown = mark_thin(markdown)
+                        markdown = mark_thin(markdown, outcome.teaser)
                     return {"url": url, "ok": True, "markdown": markdown}, None
                 except ProviderError as exc:
                     reason = classify_read_failure(exc)
@@ -279,7 +294,7 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
                     item.markdown or "", settings.read_batch_max_chars
                 )
                 if item.thin:
-                    entry["markdown"] = mark_thin(entry["markdown"])
+                    entry["markdown"] = mark_thin(entry["markdown"], item.teaser)
             else:
                 entry["error"] = item.error
                 entry["reason"] = reason_label(item.reason or "")

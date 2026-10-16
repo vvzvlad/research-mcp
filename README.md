@@ -1,13 +1,14 @@
 # research-mcp
 
-A stateless **MCP facade** that hides a pyramid of search/read providers behind a
+An **MCP facade** that hides a pyramid of search/read providers behind a
 single streamable-http MCP endpoint and exposes just **4 clean tools** with good
 help texts. An LLM gets a simple "search → read" toolset (or both at once);
 behind it, several providers are tried, merged, and failed over automatically.
 
 The app does **no authentication** — it is published through Traefik + basicAuth
-on the host. It holds no application state: the only thing persisted is a log
-file under `data/` (kept on a volume).
+on the host. The only things it persists are a log file and a small quota store
+(`data/quota.sqlite3`: per-instance quota usage and the cumulative billed
+counters), both under `data/` (kept on a volume).
 
 ## Works with zero keys
 
@@ -62,7 +63,7 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
 
 - **Search pipeline** (`searxng → duckduckgo → brave → tavily-search →
   firecrawl-search → jina-search → xmlriver → parallel → octen → linkup → youcom
-  → serper → exa`):
+  → serper → exa → openalex → semantic-scholar`):
   enabled instances run concurrently; results are merged and deduplicated by
   normalized URL (earlier pipeline position wins). Position is therefore a
   **dedup preference, not a cost gate** — every enabled instance is called on
@@ -79,11 +80,15 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   that needs no configuration, which is why it sits directly behind
   `searxng`: it is on everywhere, but a deployment that runs SearXNG must
   keep SearXNG's copy of every shared url.
-- **Read pipeline** (`youtube → instagram → instagram-profile → trafilatura →
-  jina → crawl4ai → tavily-1 → tavily-2 → firecrawl → brightdata`): here the
-  order IS a cost gate — it stops at the first sufficient answer, and
+  `openalex` and `semantic-scholar` (free keys `OPENALEX_API_KEY`,
+  `SEMANTIC_SCHOLAR_API_KEY`) mix scholarly papers into every search, linked by
+  their DOI or arXiv url where one exists so the `scholarly` reader can open them.
+- **Read pipeline** (`youtube → supadata → instagram → instagram-profile →
+  scholarly → trafilatura → jina → crawl4ai → tavily-1 → tavily-2 → firecrawl →
+  brightdata`):
+  here the order IS a cost gate — it stops at the first sufficient answer, and
   `brightdata` (the anti-bot unlocker) sits last so it only ever sees pages
-  everything cheaper already bounced off. The first three are url-specific
+  everything cheaper already bounced off. The first five are url-specific
   readers: each is offered only the urls it recognises, ahead of the probe, and
   its answer is final (see below). A single probe
   GET classifies the url. PDFs (Content-Type /
@@ -94,7 +99,9 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   `.pdf` *and* jina is keyed; for HTML, that same body is
   handed to `trafilatura` so the hot path never GETs twice, then the remaining
   instances are tried in order and the first to return content
-  `>= FALLBACK_MIN_CHARS` wins.
+  `>= FALLBACK_MIN_CHARS` wins — except a bot-challenge page (that reader counts
+  as failed) or a paywall teaser (kept only as the thin fallback, which the
+  answer then flags as a teaser rather than as the whole article).
   A **YouTube video url** (`youtube.com/watch?v=…`, `/shorts/…`, `/live/…`,
   `/embed/…`, `youtu.be/…`) is answered before the probe with the video's
   **transcript** — title, channel, description and the captions as timestamped
@@ -104,8 +111,12 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   The spoken language comes from the audio track marked "original" on an
   auto-dubbed video (which carries auto-generated captions for every dub), and
   from the single auto-generated track on a plain one.
-  A video without captions, or a fetch that fails, falls through to the normal
-  chain above.
+  When that fails — YouTube answers "Sign in to confirm you're not a bot" to IPs
+  it flags — and `SUPADATA_API_KEY` is set, the paid Supadata API is asked for
+  the same video's existing captions (`mode=native`: 1 credit per video, charged
+  also when the video has none; no title or description in its answer).
+  When the YouTube readers fail (a video without captions, a fetch that fails),
+  the read fails with their reasons and is not passed to the normal chain above.
   An **Instagram video url** (`instagram.com/reel/…`, `/reels/…`, `/p/…`,
   `/tv/…`, and `/<username>/reel/…`, `/<username>/p/…`) is answered the same way, with a
   **transcript of its audio** — author, caption and the speech as timestamped
@@ -122,6 +133,14 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   for its transcript (with `GROQ_API_KEY`). A last line `Next page: …/<username>/?after=<cursor>` points to
   the next 12 — reading that url continues the list. Needs no key. Hashtag pages
   are not covered: Instagram serves them only to a logged-in account.
+  A **DOI url** (`doi.org/…`) or **arXiv url** (`arxiv.org/abs/…`, `/pdf/…`) is
+  answered with the paper's legal **open-access full text**: arXiv (an arXiv url
+  or an arXiv DOI `10.48550/arXiv.…`) serves its own PDF, while any other DOI is
+  resolved through Unpaywall to a repository PDF or Europe PMC's full-text XML
+  (abstract + body) — repository copies first, the publisher landing page never
+  fetched. DOI resolution needs `UNPAYWALL_EMAIL` (a free, non-secret identifier
+  Unpaywall requires; without it DOI urls go straight to the normal chain); a
+  DOI with no OA copy falls through to the normal chain. arXiv needs no key.
 
 Cross-cutting: one transient retry (5xx / transport errors) with a short backoff;
 **402 (out of credits) / 429 (rate limited) are treated as a provider failure →
@@ -129,7 +148,8 @@ next instance** (this is what makes `tavily-1 → tavily-2` fail over). Vendors
 that report an empty balance with some other 4xx — serper answers `400 {"message":
 "Not enough credits"}`, octen `403 "Insufficient balance"` — are recognised by
 the body and logged as `out of credits` too, so an unpaid account never reads as
-a broken API.
+a broken API. Tavily's non-standard HTTP 432 (a spent monthly plan) is read as
+`out of credits` as well.
 
 An instance is **enabled** only if its required env var(s) are set; otherwise it
 is skipped with a log line. `duckduckgo` and `trafilatura` need no config
@@ -187,8 +207,11 @@ of one shared monthly pool. Search runs on every query and will drain that pool
 well before the readers do; when it runs out, both halves stop working.
 Keyless until registered: `XMLRIVER_USER_ID` + `XMLRIVER_API_KEY` (Yandex SERP),
 `PARALLEL_API_KEY`, `OCTEN_API_KEY`, `LINKUP_API_KEY`, `YOUCOM_API_KEY`, and
-`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `GROQ_API_KEY` enables the `instagram`
-reader (Instagram transcripts); the `youtube` and `instagram-profile` readers
+`BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `OPENALEX_API_KEY` and
+`SEMANTIC_SCHOLAR_API_KEY` (both free) enable scholarly search, `UNPAYWALL_EMAIL`
+the DOI half of the `scholarly` reader. `GROQ_API_KEY` enables the `instagram`
+reader (Instagram transcripts), `SUPADATA_API_KEY` the `supadata` reader (paid
+fallback for YouTube transcripts); the `youtube` and `instagram-profile` readers
 take no key and are always on.
 
 ## Proxy
@@ -198,7 +221,9 @@ setting `<INSTANCE>_PROXY` — useful for clean egress past IP-based blocks (e.g
 Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`,
 `JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`,
 `XMLRIVER_PROXY`, `PARALLEL_PROXY`, `OCTEN_PROXY`, `LINKUP_PROXY`,
-`YOUCOM_PROXY`, `BRIGHTDATA_PROXY`, `YOUTUBE_PROXY`, `INSTAGRAM_PROXY`. The
+`YOUCOM_PROXY`, `BRIGHTDATA_PROXY`, `YOUTUBE_PROXY`, `SUPADATA_PROXY`,
+`INSTAGRAM_PROXY`, `SCHOLARLY_PROXY`, `OPENALEX_PROXY`,
+`SEMANTIC_SCHOLAR_PROXY`. The
 instances that do not need clean egress
 have no proxy: the internal `searxng` / `crawl4ai` / `trafilatura` (which still
 take their own url/token vars) and the keyless `duckduckgo`.

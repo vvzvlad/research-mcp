@@ -1,10 +1,10 @@
 """Linkup search provider: response parsing, request body, failures.
 
-The payload mirrors the ``SearchResultsOutput`` shape documented on 2026-09-18
-at https://docs.linkup.so/pages/documentation/api-reference/endpoint/post-search
+The payload mirrors the ``SearchResultsOutput`` shape documented at
+https://docs.linkup.so/pages/documentation/api-reference/endpoint/post-search
 (``results[]`` items of ``type: "text"`` carrying ``name`` / ``url`` /
 ``content`` / ``favicon``). Network I/O is mocked with respx — no live call is
-ever made, we hold no Linkup key.
+ever made.
 """
 
 from __future__ import annotations

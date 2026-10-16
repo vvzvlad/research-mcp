@@ -4,6 +4,7 @@ All network I/O is mocked with respx. Pipelines are built via ``Pipeline.build``
 with monkeypatched provider ENV so we control exactly which instances are on.
 """
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,15 +12,23 @@ import httpx
 import pytest
 import respx
 
-from src.failure_reason import NOT_FOUND, dominant_reason
+from src.failure_reason import (
+    ACCESS_DENIED,
+    BOT_PROTECTION,
+    NO_CREDITS,
+    NOT_FOUND,
+    dominant_reason,
+)
 from src.formatting import format_search_results
 from src.pipeline import Pipeline, ReadFailed
+from src.pipeline_config import INSTANCES
 from src.providers.base import ProviderError
 from src.providers.duckduckgo import DDG_ENDPOINT
 from src.providers.instagram import GRAPHQL_ENDPOINT, GROQ_ENDPOINT
 from src.providers.pdf import NO_TEXT_LAYER_NOTICE
 from src.providers.trafilatura import extract_markdown
 from src.providers.youtube import PLAYER_ENDPOINT
+from src.quota import Quota
 from src.rerank import RERANK_ENDPOINT
 from src.settings import Settings
 from tests.conftest import (
@@ -573,13 +582,13 @@ async def test_read_url_no_specific_reader_accepts_never_reaches_them(monkeypatc
     assert groq.call_count == 0
 
 
-# -- lazy self-healing client (regression: "client has been closed") -------
+# -- lazy self-healing client ("client has been closed") -------
 
 
 @respx.mock
 async def test_read_recreates_client_after_aclose(monkeypatch, settings):
-    # Regression for the prod bug: a premature aclose() (e.g. a streamable-http
-    # lifespan shutdown) must NOT poison later requests with
+    # A premature aclose() (e.g. a streamable-http lifespan shutdown) must NOT
+    # poison later requests with
     # "Cannot send a request, as the client has been closed.". We do NOT inject a
     # client here so the pipeline owns it and we exercise lazy recreation. respx
     # patches the httpx transport globally, so the recreated real client is also
@@ -668,6 +677,104 @@ async def test_read_missing_page_fails_instead_of_serving_its_thin_error_page(
     finally:
         await pipe.aclose()
     assert dominant_reason(excinfo.value.failures) == NOT_FOUND
+
+
+# A bot-challenge page long enough to clear the thin threshold: without the
+# content guard it would be accepted and served as the article.
+CAPTCHA_PAGE = "Just a moment...\n\n" + ("Please wait while we verify your browser. " * 11)
+
+
+@respx.mock
+async def test_read_block_page_is_not_served_and_fails_with_the_category(monkeypatch, settings):
+    # A generic reader returns a bot-challenge page as `content`. It must NOT be
+    # served (not as the answer, not as a thin fallback): the chain continues and
+    # the read fails with the block category.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("CRAWL4AI_URL", "http://crawl4ai.test")
+    monkeypatch.setenv("CRAWL4AI_TOKEN", "tok")
+    assert len(CAPTCHA_PAGE) >= settings.fallback_min_chars  # would otherwise be served
+
+    url = "https://wall.test/page"
+    # trafilatura gets nothing from the thin probe body; jina and crawl4ai each
+    # return the captcha wall.
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(CAPTCHA_PAGE))
+    respx.post("http://crawl4ai.test/md").mock(
+        return_value=httpx.Response(200, json={"markdown": CAPTCHA_PAGE, "success": True})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ReadFailed) as excinfo:
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert CAPTCHA_PAGE not in str(excinfo.value)  # the wall text is not handed back
+    assert ("jina", BOT_PROTECTION) in excinfo.value.failures
+    assert ("crawl4ai", BOT_PROTECTION) in excinfo.value.failures
+    assert dominant_reason(excinfo.value.failures) == BOT_PROTECTION
+
+
+# The measured NYT shape: nav chrome, the opening paragraphs of the real article,
+# then the preview notice — long, well past both the thin and the captcha caps.
+PAYWALL_TEASER = (
+    "Skip to content\n\nTechnology\n\n"
+    + "The opening paragraph of the real article, served before the wall. " * 40
+    + "\n\nYou have a preview view of this article while we are checking your access."
+)
+
+
+@respx.mock
+async def test_read_paywall_teaser_is_served_as_a_thin_fallback(monkeypatch, settings):
+    # The teaser holds real partial text: it is not accepted as a full page, but
+    # when nothing else in the chain delivers, it is served flagged as thin.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    url = "https://paper.test/article"
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(PAYWALL_TEASER))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.markdown == PAYWALL_TEASER
+    assert outcome.thin is True
+    assert outcome.teaser is True
+    assert outcome.provider == "jina"
+    assert ("jina", ACCESS_DENIED) in outcome.failures
+
+
+@respx.mock
+async def test_read_full_text_from_a_later_reader_beats_a_paywall_teaser(monkeypatch, settings):
+    # A long teaser is never final: the chain goes on, and a reader that gets
+    # the whole article wins over it.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("CRAWL4AI_URL", "http://crawl4ai.test")
+    monkeypatch.setenv("CRAWL4AI_TOKEN", "tok")
+    url = "https://paper.test/article"
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(PAYWALL_TEASER))
+    full = "# The whole article\n\n" + ("Every paragraph of the article. " * 60)
+    respx.post("http://crawl4ai.test/md").mock(
+        return_value=httpx.Response(200, json={"markdown": full, "success": True})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.provider == "crawl4ai"
+    assert outcome.thin is False
+    assert "The whole article" in outcome.markdown
+    assert ("jina", ACCESS_DENIED) in outcome.failures
 
 
 @respx.mock
@@ -809,7 +916,7 @@ async def test_read_pdf_probe_403_falls_through_to_provider(monkeypatch, setting
 
 @respx.mock
 async def test_read_pdf_200_nonpdf_body_falls_through_to_provider(monkeypatch, settings):
-    # Regression: a .pdf url that returns HTTP 200 but whose body is NOT a
+    # A .pdf url that returns HTTP 200 but whose body is NOT a
     # parseable PDF (antibot/HTML interstitial) must NOT hard-fail. The probe
     # catches the parse error and defers to the read chain, where jina fetches
     # server-side and retrieves the real content.
@@ -846,7 +953,7 @@ async def test_read_pdf_200_nonpdf_body_no_provider_raises_normal_failure(
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
 
     url = "https://files.test/doc.pdf"
-    # Probe GET returns the 200 non-PDF interstitial (the regression trigger);
+    # Probe GET returns the 200 non-PDF interstitial;
     # trafilatura's re-fetch is then blocked (antibot), so no provider yields
     # content and the read fails through the normal path.
     respx.get(url).mock(
@@ -1180,6 +1287,26 @@ def _mock_dead(url: str):
 
 
 @respx.mock
+async def test_search_and_read_carries_the_teaser_flag(monkeypatch, settings):
+    # The batch entry must say "paywall teaser", so the flag has to travel from
+    # the read into the ReadItem.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    [url] = _mock_search_hits(1)
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(PAYWALL_TEASER))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search_and_read("q", num_results=1, language=None, candidates=1)
+    finally:
+        await pipe.aclose()
+
+    [item] = outcome.items
+    assert item.ok and item.thin and item.teaser
+
+
+@respx.mock
 async def test_search_and_read_tops_up_after_failed_reads(monkeypatch, settings):
     # Two of the first three candidates do not open, so the next wave reads
     # exactly two more: the answer still carries the requested 3 pages.
@@ -1292,10 +1419,8 @@ async def test_search_and_read_emits_a_summary_log(monkeypatch, settings, captur
 
 
 def test_extract_markdown_uses_precision(monkeypatch):
-    # Deterministic regression guard for fix C: assert the exact kwargs handed to
-    # trafilatura.extract. A content-based assertion would be tautological (it
-    # passes under both favor_recall and favor_precision); spying on the call
-    # locks the contract so a revert to favor_recall fails the test.
+    # Assert the exact kwargs handed to trafilatura.extract: a content-based
+    # assertion would pass under both favor_recall and favor_precision.
     captured_kwargs: dict[str, object] = {}
 
     def spy(html, **kwargs):
@@ -1319,9 +1444,8 @@ def test_extract_markdown_uses_precision(monkeypatch):
 @respx.mock
 async def test_scanned_pdf_falls_through_to_the_read_chain(monkeypatch, settings):
     # A PDF with no text layer is a scan. pypdf parses it but has no text to
-    # give, and this branch used to return that notice as a SUCCESS — so a scan
-    # never entered the read chain and never reached jina's OCR tier, which
-    # exists for exactly this case. It must fall through instead.
+    # give; the read must fall through to the chain (and jina's OCR tier)
+    # instead of returning pypdf's notice as a success.
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
 
@@ -1372,3 +1496,119 @@ async def test_scanned_pdf_keeps_the_notice_when_the_chain_finds_nothing(
     assert out.tried
     # Reported as a success, the way it was before the fall-through existed.
     assert any("ok=true" in line and "no text layer" in line for line in capture_logs)
+
+
+# -- persistent quotas ----------------------------------------------------
+
+
+def _with_quota(monkeypatch, name: str, quota: Quota) -> None:
+    """Give one instance a quota for this test; build() reads INSTANCES then."""
+    monkeypatch.setattr(
+        "src.pipeline.INSTANCES",
+        [replace(inst, quota=quota) if inst.name == name else inst for inst in INSTANCES],
+    )
+
+
+@respx.mock
+async def test_concurrent_searches_take_the_last_quota_slot_only_once(monkeypatch, settings):
+    # serper, not brave: brave's own 1.1s throttle would also stop the extra
+    # calls and pass this test for a reason that has nothing to do with quotas.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    _with_quota(monkeypatch, "serper", Quota(1, "monthly"))
+    _mock_duckduckgo_rate_limited()
+    route = respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(
+            200, json={"organic": [{"link": "https://s.test", "title": "S", "snippet": "s"}]}
+        )
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcomes = await asyncio.gather(*(pipe.search("q", 5, None) for _ in range(10)))
+    finally:
+        await pipe.aclose()
+
+    assert route.call_count == 1
+    assert sum("serper" in outcome.answered for outcome in outcomes) == 1
+    assert pipe._quota.used("serper") == 1
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(402),
+        httpx.Response(429),
+        httpx.Response(400, json={"message": "Not enough credits", "statusCode": 400}),
+    ],
+    ids=["402", "429", "credit-marker-4xx"],
+)
+@respx.mock
+async def test_search_instance_out_of_credits_is_not_called_again_this_period(
+    monkeypatch, settings, answer
+):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    _with_quota(monkeypatch, "serper", Quota(100, "monthly"))
+    _mock_duckduckgo_rate_limited()
+    route = respx.post("https://google.serper.dev/search").mock(return_value=answer)
+
+    pipe = Pipeline.build(settings)
+    try:
+        await pipe.search("q", 5, None)
+        second = await pipe.search("q", 5, None)
+    finally:
+        await pipe.aclose()
+
+    assert route.call_count == 1  # the second search never reached the network
+    assert pipe._quota.is_exhausted("serper")
+    assert second.failed_reasons[second.failed.index("serper")] == NO_CREDITS
+
+
+@respx.mock
+async def test_search_provider_error_refunds_the_slot(monkeypatch, settings):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    _with_quota(monkeypatch, "serper", Quota(100, "monthly"))
+    _mock_duckduckgo_rate_limited()
+    route = respx.post("https://google.serper.dev/search").mock(
+        return_value=httpx.Response(500)
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.search("q", 5, None)
+    finally:
+        await pipe.aclose()
+
+    assert route.called
+    assert "serper" in outcome.failed
+    assert pipe._quota.used("serper") == 0
+    assert not pipe._quota.is_exhausted("serper")
+
+
+@respx.mock
+async def test_read_instance_out_of_credits_is_skipped_without_a_request(monkeypatch, settings):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("TAVILY_1_API_KEY", "t1")
+    _with_quota(monkeypatch, "tavily-1", Quota(100, "monthly"))
+
+    url = "https://doc.test/page"
+    # trafilatura gets nothing out of the probe body and jina errors, so every
+    # read reaches tavily-1.
+    respx.get(url).mock(return_value=httpx.Response(200, text=THIN_HTML))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(500))
+    route = respx.post("https://api.tavily.com/extract").mock(return_value=httpx.Response(402))
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ReadFailed):
+            await pipe.read(url)
+        with pytest.raises(ReadFailed) as second:
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert route.call_count == 1  # the second read skipped tavily-1 before the network
+    assert ("tavily-1", NO_CREDITS) in second.value.failures
+    assert "tavily-1: quota exhausted for this period" in str(second.value)

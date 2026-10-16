@@ -147,6 +147,24 @@ def test_read_status_line_flags_a_thin_fallback():
     )
 
 
+def test_read_status_line_names_a_paywall_teaser():
+    # A teaser can be long, so "short" would mislead: the note must say the rest
+    # of the article is behind a paywall.
+    outcome = ReadOutcome(
+        markdown="x" * 7800,
+        provider="jina",
+        tried=["trafilatura", "jina"],
+        failures=[("trafilatura", "empty"), ("jina", "access-denied")],
+        thin=True,
+        elapsed_ms=1900,
+        teaser=True,
+    )
+    assert format_read_status(outcome) == (
+        "Статус чтения: jina (провайдеров испробовано: 2); похоже на анонс за пейволлом — "
+        "это только начало статьи, не вся она; 1.9 с"
+    )
+
+
 def test_read_status_line_names_the_local_pdf_path():
     # The PDF branch runs no read provider at all, so "провайдеров испробовано: 0"
     # next to a named winner would read as a contradiction.

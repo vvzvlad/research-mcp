@@ -5,7 +5,7 @@ list the search providers already brought — so it lives outside
 ``src/providers/`` and is wired into ``Pipeline`` directly (see
 ``Pipeline.build`` / ``Pipeline.search``).
 
-API (verified 2026-08-18 from https://api.jina.ai/openapi.json): POST
+API (per https://api.jina.ai/openapi.json): POST
 ``https://api.jina.ai/v1/rerank`` with ``Authorization: Bearer <key>`` and JSON
 body ``{"model", "query", "documents": [<str>, ...], "top_n",
 "return_documents": false}`` — the ``RerankerV3Request`` schema, whose model

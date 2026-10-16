@@ -1,9 +1,9 @@
 """Parallel Search API provider (web search tuned for LLM consumption).
 
-API (contract read 2026-09-18 from the official reference,
+API (per the official reference,
 https://docs.parallel.ai/api-reference/search-api/search, cross-checked against
 https://docs.parallel.ai/search-api/search-quickstart — NOT verified against a
-live call, we hold no key yet): POST ``https://api.parallel.ai/v1/search`` with
+live call): POST ``https://api.parallel.ai/v1/search`` with
 headers ``x-api-key`` and ``Content-Type: application/json``. ``/v1beta/search``
 is the legacy path, kept only "when maintaining an existing integration".
 
@@ -29,7 +29,7 @@ returns compressed page extracts, sometimes ending in "... (content
 truncated)"), so they are joined into a single snippet below. An empty
 ``results`` list is a normal empty answer, not a failure.
 
-No language parameter exists in the schema (checked 2026-09-18):
+No language parameter exists in the schema:
 ``advanced_settings.location`` is a country code, not a language tag.
 """
 
@@ -57,11 +57,9 @@ _EXCERPT_SEPARATOR = "\n\n"
 # Parallel returns compressed page extracts, not one-line summaries: several
 # excerpts per hit, each potentially long. Unlike every other provider here,
 # whose snippet is a sentence or two, an untrimmed hit could put tens of
-# kilobytes into a single web_search answer. 1000 chars is the threshold the
-# project already applies to a search result's text — see the document builder
-# in src/rerank.py, which truncates "{title}\n{snippet}" at exactly this before
-# sending it to the reranker — so the model and the reranker read texts of the
-# same order rather than one seeing kilobytes the other never scored.
+# kilobytes into a single web_search answer. 1000 chars matches the truncation
+# of "{title}\n{snippet}" in src/rerank.py's document builder, so the model and
+# the reranker read texts of the same size.
 _SNIPPET_MAX_CHARS = 1000
 
 

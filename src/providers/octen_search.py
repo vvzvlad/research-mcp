@@ -1,8 +1,7 @@
 """Octen Web Search API provider (live web index, minute-fresh).
 
-API (contract read 2026-09-18 from the official reference,
-https://docs.octen.ai/api-reference/search.md — NOT verified against a live
-call, we hold no key yet): POST ``https://api.octen.ai/search``. The key goes
+API (per the official reference, https://docs.octen.ai/api-reference/search.md
+— NOT verified against a live call): POST ``https://api.octen.ai/search``. The key goes
 either in ``x-api-key`` (apiKey scheme) or as ``Authorization: Bearer <key>``
 (http bearer); both are accepted, this module sends ``x-api-key``.
 
@@ -50,7 +49,7 @@ OCTEN_COUNT_MIN = 1
 OCTEN_COUNT_MAX = 100
 
 # Every value Octen's `language` enum accepts, verbatim from the request schema
-# (18 ISO 639-1 codes, read 2026-09-18). Plain two-letter codes only — no
+# (18 ISO 639-1 codes). Plain two-letter codes only — no
 # regional tags, so `en-GB` or `ru-RU` must be reduced before being sent.
 _OCTEN_LANGS = frozenset(
     {
@@ -81,8 +80,7 @@ def _highlight_text(value: object) -> str:
     ``highlight.max_tokens`` knob, so a LIST of fragments is as plausible as a
     single string — and the neighbouring vendors settle it both ways: Parallel
     returns a list in ``excerpts``, You.com a list in ``snippets`` beside a
-    string ``description``. We have no Octen key to settle it by observation, so
-    accept both shapes: calling ``.strip()`` on a list would raise
+    string ``description``. Unverified against a live call, so accept both shapes: calling ``.strip()`` on a list would raise
     AttributeError, which ``Pipeline._one`` would log as a crashed provider on
     EVERY query — the instance would simply never return anything.
     """

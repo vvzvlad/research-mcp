@@ -1,8 +1,7 @@
 """SearXNG local throttle: one query per interval, enforced by SKIPPING.
 
-Why it exists (prod measurement 2026-08-09): the only engine left alive in our
-SearXNG instance is DuckDuckGo, which blocks for 7-8 minutes after ~4 rapid
-queries but answers 8 of 8 when they are 45s apart.
+Why it exists: the only working engine in our SearXNG instance is DuckDuckGo,
+which blocks for 7-8 minutes after ~4 rapid queries but not at a 45s gap.
 
 The throttle must never sleep — ``Pipeline.search`` gathers all search providers
 concurrently and awaits all of them, so a waiting searxng would stall the whole
