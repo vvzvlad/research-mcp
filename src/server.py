@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+import contextlib
 from contextlib import asynccontextmanager
+import time
 from typing import Any
 
 from loguru import logger
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from src.formatting import (
     format_batch_status,
@@ -52,6 +54,72 @@ READ_PAGES_MAX = 20
 # Default number of pages search_and_read reads per call. Small on purpose: each
 # result costs a real read, and the answer carries page text, not snippets.
 SEARCH_AND_READ_DEFAULT = 5
+
+# Progress heartbeat for the long tools. A client that hears nothing from a tool
+# call assumes it is hung and aborts (Claude Code: 300 s of no response and no
+# progress). A read can legitimately run for minutes — the probe and every
+# provider in the chain each burn up to 2×request_timeout on a site that hangs —
+# and search_and_read / read_pages stack several waves of those. So the tools
+# that can outlive the idle timeout send a progress notification every
+# HEARTBEAT_SECONDS with the elapsed seconds, which resets the client's timer. A
+# client that did not opt into progress (no progressToken in the request) gets
+# nothing: the token check below answers that before a task is even started, so
+# there is no timer running for anyone else.
+HEARTBEAT_SECONDS = 30.0
+
+
+@asynccontextmanager
+async def _heartbeat(ctx: Context | None) -> AsyncIterator[None]:
+    """Send progress notifications every ``HEARTBEAT_SECONDS`` while the body runs.
+
+    Best-effort liveness only: the beat value is the elapsed wall time and there
+    is no total. A send that raises (the session's stream closed under it) stops
+    the beat; a client that merely went away mid-call is invisible here — the
+    transport drops those notifications silently and the beat runs on until the
+    tool returns. Outside a real request the SDK ``Context`` raises on
+    ``request_context`` — same as having no progressToken: no beat starts.
+    """
+    started = time.monotonic()
+    beat: asyncio.Task[None] | None = None
+    if ctx is not None:
+        try:
+            meta = ctx.request_context.meta
+        except ValueError:
+            meta = None
+        token = meta.progressToken if meta is not None else None
+        if token is not None:
+
+            async def _beat() -> None:
+                while True:
+                    await asyncio.sleep(HEARTBEAT_SECONDS)
+                    try:
+                        # Not report_progress: it omits related_request_id, and
+                        # without it the transport cannot attach the
+                        # notification to THIS tool call — it lands in the
+                        # standalone GET stream, which a session that exhausted
+                        # its reconnects does not have, and the beat is lost.
+                        # Tying the notification to the request id routes it
+                        # into the SSE response of the very POST the caller is
+                        # waiting on.
+                        await ctx.request_context.session.send_progress_notification(
+                            progress_token=token,
+                            progress=int(time.monotonic() - started),
+                            related_request_id=ctx.request_id,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:  # noqa: BLE001 — delivery is best-effort
+                        return  # a closed stream: further beats are pointless
+
+            beat = asyncio.create_task(_beat())
+    try:
+        yield
+    finally:
+        if beat is not None:
+            beat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await beat
+
 
 SERVER_INSTRUCTIONS = (
     "Web research: search the web and read any url as clean Markdown. Use these "
@@ -159,18 +227,19 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
             "be researched — search_and_read."
         ),
     )
-    async def read_page(url: str) -> str:
-        try:
-            outcome = await pipeline.read(url)
-        except ReadFailed as exc:
-            # A failed read carries telemetry too: the category says whether
-            # another attempt could ever help. Same shape as a failed url in a
-            # read_pages batch.
-            status = format_read_failure_status(classify_read_failure(exc), len(exc.tried))
-            return f"{exc}\n\n---\n{status}"
-        except ProviderError as exc:
-            # Raised before any provider ran (the SSRF guard) — nothing to report.
-            return str(exc)
+    async def read_page(url: str, ctx: Context | None = None) -> str:
+        async with _heartbeat(ctx):
+            try:
+                outcome = await pipeline.read(url)
+            except ReadFailed as exc:
+                # A failed read carries telemetry too: the category says whether
+                # another attempt could ever help. Same shape as a failed url in a
+                # read_pages batch.
+                status = format_read_failure_status(classify_read_failure(exc), len(exc.tried))
+                return f"{exc}\n\n---\n{status}"
+            except ProviderError as exc:
+                # Raised before any provider ran (the SSRF guard) — nothing to report.
+                return str(exc)
         # Behind a horizontal rule: the status line is about the page, not part
         # of it, and must not read as page text.
         return f"{outcome.markdown}\n\n---\n{format_read_status(outcome)}"
@@ -196,7 +265,7 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
             "context) — call search_and_read. One url whole, uncapped — read_page."
         ),
     )
-    async def read_pages(urls: list[str]) -> dict[str, Any]:
+    async def read_pages(urls: list[str], ctx: Context | None = None) -> dict[str, Any]:
         capped = urls[:READ_PAGES_MAX]
         semaphore = asyncio.Semaphore(settings.read_pages_concurrency)
 
@@ -221,7 +290,8 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
                 entry["reason"] = reason_label(reason)
                 return entry, reason
 
-        outcomes = await asyncio.gather(*(_one(url) for url in capped))
+        async with _heartbeat(ctx):
+            outcomes = await asyncio.gather(*(_one(url) for url in capped))
         pages = [entry for entry, _ in outcomes]
         reasons = [reason for _, reason in outcomes if reason is not None]
         # Per-url lines are emitted by pipeline.read; add one batch summary line.
@@ -265,6 +335,7 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
         query: str,
         num_results: int = SEARCH_AND_READ_DEFAULT,
         language: str | None = None,
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
         # Every result costs a real read, so the per-call cap is the read one.
         count = max(1, min(num_results, READ_PAGES_MAX))
@@ -272,11 +343,12 @@ def build_server(settings: Settings, pipeline: Pipeline | None = None) -> FastMC
         # because some of those urls will not open. The cap on a single search
         # request lives here, so the pipeline is handed the final number.
         candidates = min(count * 2 + 2, SEARCH_RESULTS_MAX)
-        try:
-            outcome = await pipeline.search_and_read(query, count, language, candidates)
-        except ProviderError as exc:
-            # Raised before any provider ran — there is no run to report.
-            return {"summary": str(exc), "results": []}
+        async with _heartbeat(ctx):
+            try:
+                outcome = await pipeline.search_and_read(query, count, language, candidates)
+            except ProviderError as exc:
+                # Raised before any provider ran — there is no run to report.
+                return {"summary": str(exc), "results": []}
 
         results: list[dict[str, Any]] = []
         reasons: list[str] = []

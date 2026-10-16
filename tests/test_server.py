@@ -3,6 +3,8 @@ English texts (plus the cross-references), and each tool delegates to the
 pipeline without ever raising.
 """
 
+import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,7 +12,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from src.pipeline import ReadFailed, ReadItem, ReadOutcome, SearchOutcome, SearchReadOutcome
 from src.providers.base import SearchResult
-from src.server import build_server
+from src.server import _heartbeat, build_server
 
 
 class FakePipeline:
@@ -522,3 +524,177 @@ async def test_numeric_string_arguments_are_accepted(settings):
     # validation error, not something silently coerced.
     with pytest.raises(ToolError):
         await _call(srv, "web_search", {"query": "q", "num_results": "восемь"})
+
+
+class _FakeCtx:
+    """Duck-typed stand-in for the SDK ``Context`` in the heartbeat tests.
+
+    ``token`` is what the fake request's ``progressToken`` holds — ``None``
+    means the client never opted into progress, and ``broken=True`` makes the
+    fake session fail every send the way a closed stream would. ``raising=True``
+    mimics the real Context outside a request: its ``request_context`` property
+    raises ``ValueError``, which the heartbeat must treat like no token. The
+    fake session records every send; ``two_beats`` is set on the second one.
+    """
+
+    def __init__(self, token: int | None, *, raising: bool = False, broken: bool = False):
+        self.beats: list[float] = []
+        self.calls: list[dict] = []
+        self._raising = raising
+        self._broken = broken
+        self.two_beats = asyncio.Event()
+        self._request_context = SimpleNamespace(
+            meta=SimpleNamespace(progressToken=token),
+            session=self,
+            request_id=42,
+        )
+
+    @property
+    def request_context(self):
+        if self._raising:
+            raise ValueError("Context is not available outside of a request")
+        return self._request_context
+
+    @property
+    def request_id(self):
+        return str(self._request_context.request_id)
+
+    async def send_progress_notification(
+        self, *, progress_token, progress, related_request_id=None, **kwargs
+    ):
+        self.calls.append(
+            {
+                "progress_token": progress_token,
+                "progress": progress,
+                "related_request_id": related_request_id,
+            }
+        )
+        self.beats.append(progress)
+        if self._broken:
+            raise RuntimeError("session stream closed")
+        if len(self.beats) >= 2:
+            self.two_beats.set()
+
+
+async def test_heartbeat_beats_until_the_body_returns(monkeypatch):
+    monkeypatch.setattr("src.server.HEARTBEAT_SECONDS", 0.01)
+    ctx = _FakeCtx(token=7)
+    async with _heartbeat(ctx):
+        # No blind sleep: the body waits for the second beat to arrive, so a
+        # slow event loop delays the test instead of failing it.
+        await asyncio.wait_for(ctx.two_beats.wait(), 5)
+    assert ctx.beats == sorted(ctx.beats)
+    after_last_beat = len(ctx.beats)
+    await asyncio.sleep(0.02)
+    # No beat fires once the body has returned: the beat task is cancelled in
+    # the finally block, not left running in the background.
+    assert len(ctx.beats) == after_last_beat
+
+
+async def test_heartbeat_ties_the_beat_to_the_tool_call(monkeypatch):
+    # The notification must carry related_request_id: without it the transport
+    # cannot attach it to this call's POST response — it goes to the standalone
+    # GET stream, which a session with exhausted reconnects does not have, and
+    # the beat is silently lost there.
+    monkeypatch.setattr("src.server.HEARTBEAT_SECONDS", 0.01)
+    ctx = _FakeCtx(token=7)
+    async with _heartbeat(ctx):
+        await asyncio.wait_for(ctx.two_beats.wait(), 5)
+    assert all(call["related_request_id"] == ctx.request_id for call in ctx.calls)
+    assert all(call["progress_token"] == 7 for call in ctx.calls)
+
+
+async def test_heartbeat_without_a_progress_token_starts_nothing(monkeypatch):
+    monkeypatch.setattr("src.server.HEARTBEAT_SECONDS", 0.01)
+    ctx = _FakeCtx(token=None)
+    async with _heartbeat(ctx):
+        await asyncio.sleep(0.03)
+    assert ctx.beats == []
+
+
+async def test_heartbeat_outside_a_request_starts_nothing(monkeypatch):
+    # The SDK Context raises on request_context outside a request; the heartbeat
+    # must take that as "no progress subscription", not crash the tool.
+    monkeypatch.setattr("src.server.HEARTBEAT_SECONDS", 0.01)
+    ctx = _FakeCtx(token=7, raising=True)
+    async with _heartbeat(ctx):
+        await asyncio.sleep(0.03)
+    assert ctx.beats == []
+
+
+async def test_heartbeat_beat_failures_stop_the_beat(monkeypatch):
+    # A send that raises (session stream closed under the call) must neither
+    # fail the body nor keep beating: exactly one failed send, then silence.
+    monkeypatch.setattr("src.server.HEARTBEAT_SECONDS", 0.01)
+    ctx = _FakeCtx(token=7, broken=True)
+    with pytest.raises(TimeoutError):
+        async with _heartbeat(ctx):
+            await asyncio.wait_for(ctx.two_beats.wait(), 0.3)
+    assert len(ctx.calls) == 1
+
+
+async def test_context_parameter_is_hidden_from_the_tool_schema(server):
+    # The ctx argument is wiring, not model-facing API: FastMCP must keep it out
+    # of the input schema of every tool that uses the heartbeat.
+    by_name = {t.name: t for t in await server.list_tools()}
+    for name in ("read_page", "read_pages", "search_and_read"):
+        assert "ctx" not in by_name[name].inputSchema["properties"], name
+
+
+class _SlowReadPipeline(FakePipeline):
+    """FakePipeline whose every long call runs until the client has been notified.
+
+    The ``done`` event is set by the test's progress callback once two beats
+    have arrived — so the test has no timing assumptions at all: if the
+    notifications never reach the client, the call blocks until the outer
+    ``asyncio.wait_for`` fails the test. Both await paths wait: ``read`` is
+    what read_page/read_pages spend their time in, while the canned
+    ``search_and_read`` never reaches ``read``.
+    """
+
+    def __init__(self, done: asyncio.Event):
+        super().__init__()
+        self._done = done
+
+    async def read(self, url):
+        await self._done.wait()
+        return await super().read(url)
+
+    async def search_and_read(self, query, num_results, language, candidates):
+        await self._done.wait()
+        return await super().search_and_read(query, num_results, language, candidates)
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("read_page", {"url": "https://slow.test"}),
+        ("read_pages", {"urls": ["https://slow.test"]}),
+        ("search_and_read", {"query": "q"}),
+    ],
+)
+async def test_long_calls_notify_progress_over_a_real_client(settings, monkeypatch, tool, args):
+    # The user's failure, end to end: the client passes a progressToken (the way
+    # Claude Code does when it tracks a tool call), the call runs long — and the
+    # heartbeats must reach the client as notifications/progress, which resets
+    # its idle timer instead of leaving the call silent until it aborts.
+    monkeypatch.setattr("src.server.HEARTBEAT_SECONDS", 0.02)
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    beats: list[tuple[float, float | None, str | None]] = []
+    got_two = asyncio.Event()
+
+    def on_progress(progress: float, total: float | None, message: str | None):
+        beats.append((progress, total, message))
+        if len(beats) >= 2:
+            got_two.set()
+
+    async with create_connected_server_and_client_session(
+        build_server(settings, pipeline=_SlowReadPipeline(got_two))
+    ) as session:
+        await asyncio.wait_for(
+            session.call_tool(tool, args, progress_callback=on_progress), 10
+        )
+    assert len(beats) >= 2, "fewer than two progress notifications reached the client"
+    assert all(total is None for _, total, _ in beats)
+    assert [p for p, _, _ in beats] == sorted(p for p, _, _ in beats)
