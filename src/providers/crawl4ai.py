@@ -18,6 +18,12 @@ from src.providers.registry import register
 class Crawl4aiRead:
     """Headless-browser read via self-hosted Crawl4AI (requires url + token)."""
 
+    # The browser opens the target from this deployment's own network, so a host
+    # the direct probe could not connect to (or finish a TLS handshake with) is
+    # blocked for it the same way; the pipeline skips it after a probe connect
+    # timeout.
+    fetches_from_own_network = True
+
     def __init__(self, config: ProviderConfig) -> None:
         if not config.url:
             raise ValueError("crawl4ai requires a url")

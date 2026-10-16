@@ -106,7 +106,12 @@ class SearchProvider(Protocol):
 
 @runtime_checkable
 class ReadProvider(Protocol):
-    """A configured read/extract instance."""
+    """A configured read/extract instance.
+
+    An optional class attribute ``fetches_from_own_network`` (read with a ``False``
+    default) marks a reader that opens the target url from this deployment's own
+    network; the pipeline skips it when the direct probe could not connect.
+    """
 
     name: str
     # Proxy URL this instance routes through (None = direct egress).

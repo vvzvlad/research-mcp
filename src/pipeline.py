@@ -24,8 +24,10 @@ whatever its length, a failure falls through unless the reader sets
 ``falls_through = False`` (the YouTube readers: the read then fails once the
 url-specific readers are spent). Right before the first other
 instance, read detects PDFs (Content-Type / ``.pdf`` suffix / ``%PDF`` magic)
-and extracts them with pypdf. Otherwise the first instance to return content
-``>= fallback_min_chars`` wins; thin/empty/error → next instance. A
+and extracts them with pypdf; a probe the host never answered (timeout) skips the
+readers that would repeat the same request from this network (trafilatura, and
+crawl4ai when no connection or TLS handshake completed). Otherwise the first instance
+to return content ``>= fallback_min_chars`` wins; thin/empty/error → next instance. A
 bot-challenge page or a paywall teaser (``src/content_guard.py``) never wins: the
 first is a failure, the second only a thin-fallback candidate. It returns a
 ``ReadOutcome``: the markdown
@@ -205,6 +207,40 @@ def _is_tls_verify_error(exc: Exception) -> bool:
         cur = cur.__cause__ or cur.__context__
         seen += 1
     return False
+
+
+def _host_timeout(exc: Exception) -> httpx.TimeoutException | None:
+    """``exc`` when it is the host's own silence (connect or read timeout), else None.
+
+    A pool timeout is our own pool, not the host; a write timeout on a GET with no
+    body is too rare to judge a host by.
+    """
+    return exc if isinstance(exc, (httpx.ConnectTimeout, httpx.ReadTimeout)) else None
+
+
+def _probe_timeout_covers(provider: ReadProvider, probe_timeout: httpx.TimeoutException) -> bool:
+    """True when the probe's timeout already answers for ``provider``.
+
+    The probe is a direct GET from this server, and trafilatura would send the
+    very same request (same client, same headers). Waiting a second
+    ``request_timeout`` for it, doubled by the retry, is what kept a dead host's
+    read at two minutes. This is a trade, not a certainty: on the prod log of
+    2026-08-09, 16 of the 657 reads slower than 25 s were won by exactly that
+    repeat after a hung probe (the host answered the second time); the other
+    ~640 slow reads got nothing from it. Those 16 now go on to the remote readers.
+
+    ConnectTimeout means no TCP connection and no finished TLS handshake within
+    the timeout — httpcore raises it for both — and a browser on this network is
+    blocked the same way, so every ``fetches_from_own_network`` reader (crawl4ai)
+    is skipped too. ReadTimeout means the request was delivered and the host went
+    silent: a real browser may be answered where a bare HTTP client is not, so
+    crawl4ai stays in the chain for it.
+    """
+    if isinstance(provider, TrafilaturaRead):
+        return True
+    return isinstance(probe_timeout, httpx.ConnectTimeout) and getattr(
+        provider, "fetches_from_own_network", False
+    )
 
 
 def _normalize_url(url: str) -> str:
@@ -737,6 +773,10 @@ class Pipeline:
         # is NOT a provider call, so it is never billed.
         # The probe never hard-fails: a fetch error or an unparseable "PDF"
         # defers to the read chain below (jina/tavily/firecrawl fetch server-side).
+        # A probe that timed out is the one exception to "defer everything": the
+        # host did not answer from this network, so the providers that would send
+        # the same request from the same network are skipped
+        # (_probe_timeout_covers) instead of each waiting out its own timeout.
         #
         # A PDF with a text layer is done there. A PDF WITHOUT one is a scan:
         # fall through to the read chain, keeping pypdf's notice as the last
@@ -751,6 +791,7 @@ class Pipeline:
         # ReadProvider protocol has no way to pass the probe's verdict down.
         probed = False
         probe_html: str | None = None
+        probe_timeout: httpx.TimeoutException | None = None
         pdf_notice: str | None = None
         best_thin: str | None = None
         best_thin_name: str | None = None
@@ -763,7 +804,7 @@ class Pipeline:
                 break
             if not specific and not probed:
                 probed = True
-                pdf_text, probe_html = await self._probe(
+                pdf_text, probe_html, probe_timeout = await self._probe(
                     self._clients.guarded_client_for(None), url
                 )
                 if pdf_text is not None:
@@ -780,6 +821,13 @@ class Pipeline:
                             elapsed_ms=_ms(),
                         )
                     pdf_notice = pdf_text
+            if probe_timeout is not None and _probe_timeout_covers(provider, probe_timeout):
+                # Not tried and not billed: no request is sent, so `tried` and the
+                # quota stay as they were. The failure is recorded so the model
+                # sees why this reader is absent.
+                errors.append(f"{provider.name}: skipped, the direct probe already timed out")
+                failures.append((provider.name, failure_reason.TIMEOUT))
+                continue
             tried.append(provider.name)
             # Same quota bookkeeping as in search: reserve before the network,
             # skip a spent instance, refund a failure that is not the vendor's
@@ -892,8 +940,10 @@ class Pipeline:
             url,
             tried,
             # Flat categories, like the search line's reasons= — the instance
-            # names are already in tried=, and a grep over reasons= must see the
-            # same shape in both lines.
+            # names are in tried= (a reader skipped after a probe timeout was
+            # never tried, so it is named only in errors=, and reasons= can be
+            # longer than tried=), and a grep over reasons= must see the same
+            # shape in both lines.
             [reason for _, reason in failures],
             paid_calls,
             self._cum_paid,
@@ -933,15 +983,20 @@ class Pipeline:
             return await provider.read(self._clients.guarded_client_for(provider.proxy), url)
         return await provider.read(self._clients.client_for(provider.proxy), url)
 
-    async def _probe(self, client: httpx.AsyncClient, url: str) -> tuple[str | None, str | None]:
+    async def _probe(
+        self, client: httpx.AsyncClient, url: str
+    ) -> tuple[str | None, str | None, httpx.TimeoutException | None]:
         """Fetch ``url`` once and classify it.
 
-        Returns ``(pdf_text, html)``:
-        - PDF detected → ``(extracted_text, None)``.
-        - HTML fetched → ``(None, body_text)`` so the caller can reuse the body.
-        - probe could not fetch the page → ``(None, None)``; the read pipeline then
-          tries its providers (jina/tavily/firecrawl fetch server-side and can often
-          retrieve pages/PDFs the direct client cannot — SSL/403/anti-bot).
+        Returns ``(pdf_text, html, host_timeout)``:
+        - PDF detected → ``(extracted_text, None, None)``.
+        - HTML fetched → ``(None, body_text, None)`` so the caller can reuse the body.
+        - probe could not fetch the page → ``(None, None, host_timeout)``; the read
+          pipeline then tries its providers (jina/tavily/firecrawl fetch server-side
+          and can often retrieve pages/PDFs the direct client cannot — SSL/403/
+          anti-bot). ``host_timeout`` is the connect/read timeout when the host never
+          answered, else None; it lets the chain skip the providers that would only
+          repeat the same silent request.
 
         A TLS certificate-verification failure triggers ONE retry without
         verification (some legitimate hosts ship a broken chain). The probe never
@@ -949,13 +1004,13 @@ class Pipeline:
         and a body that looks like a PDF but fails to parse ALSO defers to the
         provider chain instead of raising.
         """
-        response = await self._probe_fetch(client, url)
+        response, host_timeout = await self._probe_fetch(client, url)
         if response is None:
-            return None, None
+            return None, None, host_timeout
         content_type = response.headers.get("Content-Type")
         if looks_like_pdf(url, content_type, response.content[:8]):
             try:
-                return extract_pdf_text(response.content), None
+                return extract_pdf_text(response.content), None, None
             except ProviderError:
                 # Looked like a PDF (usually just the .pdf suffix) but the bytes
                 # do not parse as one — typically an antibot/HTML interstitial
@@ -968,11 +1023,16 @@ class Pipeline:
                     "deferring to provider chain",
                     url,
                 )
-                return None, None
-        return None, response.text
+                return None, None, None
+        return None, response.text, None
 
-    async def _probe_fetch(self, client: httpx.AsyncClient, url: str) -> httpx.Response | None:
-        """GET ``url`` for the probe; return the response or ``None`` if unfetchable.
+    async def _probe_fetch(
+        self, client: httpx.AsyncClient, url: str
+    ) -> tuple[httpx.Response | None, httpx.TimeoutException | None]:
+        """GET ``url`` for the probe: ``(response, None)`` or ``(None, host_timeout)``.
+
+        The response is ``None`` if the url is unfetchable; ``host_timeout`` is set
+        only when the host itself never answered (connect or read timeout).
 
         On a TLS certificate-verification error, retry once with verification
         disabled (public read-only fetch; we accept the MITM risk and warn).
@@ -980,10 +1040,10 @@ class Pipeline:
         try:
             response = await client.get(url, headers={"User-Agent": BROWSER_USER_AGENT})
             response.raise_for_status()
-            return response
+            return response, None
         except httpx.HTTPError as exc:
             if not _is_tls_verify_error(exc):
-                return None
+                return None, _host_timeout(exc)
         # TLS verification failed → one insecure retry on a throwaway client.
         logger.warning("read url={} -> TLS verification failed; retrying without verification", url)
         try:
@@ -998,9 +1058,9 @@ class Pipeline:
                 response = await insecure.get(url, headers={"User-Agent": BROWSER_USER_AGENT})
                 response.raise_for_status()
                 _ = response.content  # force-read the body before the client closes
-                return response
-        except httpx.HTTPError:
-            return None
+                return response, None
+        except httpx.HTTPError as exc:
+            return None, _host_timeout(exc)
 
     # -- search + read (combined) -------------------------------------------
 

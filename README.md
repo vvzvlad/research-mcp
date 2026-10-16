@@ -97,7 +97,9 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   a shot at it with their own parsers, with pypdf's notice kept as the last
   resort. jina's OCR tier joins that attempt only when the url path ends in
   `.pdf` *and* jina is keyed; for HTML, that same body is
-  handed to `trafilatura` so the hot path never GETs twice, then the remaining
+  handed to `trafilatura` so the hot path never GETs twice (a probe the host never
+  answered skips `trafilatura`, and `crawl4ai` when no connection or TLS handshake
+  completed, instead of waiting out the same timeout again), then the remaining
   instances are tried in order and the first to return content
   `>= FALLBACK_MIN_CHARS` wins — except a bot-challenge page (that reader counts
   as failed) or a paywall teaser (kept only as the thin fallback, which the

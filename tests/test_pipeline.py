@@ -17,6 +17,7 @@ from src.failure_reason import (
     BOT_PROTECTION,
     NO_CREDITS,
     NOT_FOUND,
+    TIMEOUT,
     dominant_reason,
 )
 from src.formatting import format_search_results
@@ -1055,6 +1056,116 @@ async def test_read_tls_verify_error_retries_insecure(monkeypatch, settings, cap
     assert "Hello PDF research-mcp" in out
     assert route.call_count == 2  # original + the insecure retry
     assert any("TLS verification failed" in m for m in capture_logs)
+
+
+# -- probe timeout skips the readers that would repeat the request ---------
+
+
+def _enable_crawl4ai(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
+    monkeypatch.setenv("CRAWL4AI_URL", "http://crawl4ai.test")
+    monkeypatch.setenv("CRAWL4AI_TOKEN", "tok")
+
+
+@respx.mock
+async def test_read_probe_connect_timeout_skips_trafilatura(monkeypatch, settings):
+    # The host never accepts a connection from here. trafilatura would send the
+    # same GET and wait out its own timeout (doubled by the retry) to learn it
+    # again — that is what kept a dead host's read at ~2 min. jina, which fetches
+    # from its own network, is asked right away.
+    _enable_crawl4ai(monkeypatch)
+    url = "https://dead-from-here.test/page"
+    page = respx.get(url).mock(side_effect=httpx.ConnectTimeout("no route"))
+    jina_md = "# Via jina\n\n" + ("Fetched from another network. " * 30)
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(jina_md))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert "Via jina" in outcome.markdown
+    assert page.call_count == 1  # the probe only: trafilatura did not re-send it
+    # A skipped reader sent nothing, so it is not "tried" — but the model is told
+    # why it is absent, as a timeout.
+    assert outcome.tried == ["jina"]
+    assert ("trafilatura", TIMEOUT) in outcome.failures
+
+
+@respx.mock
+async def test_read_probe_connect_timeout_records_skipped_readers_when_all_fail(
+    monkeypatch, settings
+):
+    _enable_crawl4ai(monkeypatch)
+    url = "https://dead-from-here.test/page"
+    respx.get(url).mock(side_effect=httpx.ConnectTimeout("no route"))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(500))
+    crawl = respx.post("http://crawl4ai.test/md").mock(return_value=httpx.Response(500))
+
+    pipe = Pipeline.build(settings)
+    try:
+        with pytest.raises(ReadFailed) as info:
+            await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert crawl.call_count == 0
+    assert info.value.tried == ["jina"]
+    assert info.value.failures == [
+        ("trafilatura", TIMEOUT),
+        ("jina", "other"),
+        ("crawl4ai", TIMEOUT),
+    ]
+    assert "skipped" in str(info.value)
+
+
+@respx.mock
+async def test_read_probe_read_timeout_skips_only_trafilatura(monkeypatch, settings):
+    # The host accepted the connection and then said nothing. The same GET would
+    # hang again, so trafilatura is skipped — but a real browser may still be
+    # answered where a bare HTTP client is not, so crawl4ai keeps its turn.
+    _enable_crawl4ai(monkeypatch)
+    url = "https://tarpit.test/page"
+    page = respx.get(url).mock(side_effect=httpx.ReadTimeout("silent"))
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=httpx.Response(500))
+    crawl_md = "# Browser result\n\n" + ("Rendered content. " * 40)
+    crawl = respx.post("http://crawl4ai.test/md").mock(
+        return_value=httpx.Response(200, json={"markdown": crawl_md, "success": True})
+    )
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert outcome.provider == "crawl4ai"
+    assert page.call_count == 1
+    assert crawl.call_count == 1
+    assert outcome.tried == ["jina", "crawl4ai"]
+
+
+@respx.mock
+async def test_read_probe_http_error_still_tries_trafilatura(monkeypatch, settings):
+    # Only the host's own silence skips a reader. An HTTP error answers quickly
+    # and says nothing about what a second request would get (a 403 for the
+    # probe's client is not a verdict on the next one), so the chain is unchanged.
+    _enable_crawl4ai(monkeypatch)
+    url = "https://picky.test/page"
+    page = respx.get(url).mock(return_value=httpx.Response(403))
+    jina_md = "# Via jina\n\n" + ("Fetched from another network. " * 30)
+    respx.get(f"https://r.jina.ai/{url}").mock(return_value=_jina_answer(jina_md))
+
+    pipe = Pipeline.build(settings)
+    try:
+        outcome = await pipe.read(url)
+    finally:
+        await pipe.aclose()
+
+    assert page.call_count == 2  # the probe and trafilatura's own request
+    assert outcome.tried == ["trafilatura", "jina"]
 
 
 # -- transient retry -------------------------------------------------------
