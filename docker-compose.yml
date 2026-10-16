@@ -40,6 +40,7 @@ services:
       CRAWL4AI_TOKEN: XXX        # required IF CRAWL4AI_URL is set
       TAVILY_1_API_KEY: XXX      # optional (primary)
       TAVILY_2_API_KEY: XXX      # optional (failover)
+      TAVILY_3_API_KEY: XXX      # optional (second failover)
       FIRECRAWL_API_KEY: XXX     # optional
       GROQ_API_KEY: XXX          # optional: Instagram video transcripts (Groq Whisper)
       SUPADATA_API_KEY: XXX      # optional: paid fallback for YouTube transcripts (Supadata)
@@ -51,6 +52,7 @@ services:
       # JINA_PROXY: socks5://proxy.invalid:1080
       # TAVILY_1_PROXY: socks5://proxy.invalid:1080
       # TAVILY_2_PROXY: socks5://proxy.invalid:1080
+      # TAVILY_3_PROXY: socks5://proxy.invalid:1080
       # FIRECRAWL_PROXY: socks5://proxy.invalid:1080
       # OPENALEX_PROXY: socks5://proxy.invalid:1080
       # SEMANTIC_SCHOLAR_PROXY: socks5://proxy.invalid:1080

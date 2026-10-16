@@ -56,7 +56,7 @@ Providers are **plugins**. We separate:
   per module in `src/providers/`, registered with `@register("type")`.
 - **instance** — a configured copy of a type with its secrets/URL resolved from
   **named environment variables** (multiple instances of one type are allowed,
-  e.g. `tavily-1` / `tavily-2` with different keys).
+  e.g. `tavily-1` / `tavily-2` / `tavily-3` with different keys).
 
 Which instances exist and the order each pipeline tries them is configured **in
 code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
@@ -84,7 +84,7 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
   `SEMANTIC_SCHOLAR_API_KEY`) mix scholarly papers into every search, linked by
   their DOI or arXiv url where one exists so the `scholarly` reader can open them.
 - **Read pipeline** (`youtube → supadata → instagram → instagram-profile →
-  scholarly → trafilatura → jina → crawl4ai → tavily-1 → tavily-2 → firecrawl →
+  scholarly → trafilatura → jina → crawl4ai → tavily-1 → tavily-2 → tavily-3 → firecrawl →
   brightdata`):
   here the order IS a cost gate — it stops at the first sufficient answer, and
   `brightdata` (the anti-bot unlocker) sits last so it only ever sees pages
@@ -146,7 +146,7 @@ code** (`src/pipeline_config.py`); keys/URLs come **from ENV by variable name**.
 
 Cross-cutting: one transient retry (5xx / transport errors) with a short backoff;
 **402 (out of credits) / 429 (rate limited) are treated as a provider failure →
-next instance** (this is what makes `tavily-1 → tavily-2` fail over). Vendors
+next instance** (this is what makes `tavily-1 → tavily-2 → tavily-3` fail over). Vendors
 that report an empty balance with some other 4xx — serper answers `400 {"message":
 "Not enough credits"}`, octen `403 "Insufficient balance"` — are recognised by
 the body and logged as `out of credits` too, so an unpaid account never reads as
@@ -202,7 +202,7 @@ everything below is optional on top of them: `SEARXNG_URL`, `BRAVE_API_KEY`,
 `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`
 (one key enables the `jina` reader in keyed mode, the `jina-search` provider and
 the search reranker; the reader alone also works keyless), `CRAWL4AI_URL` +
-`CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`, `TAVILY_2_API_KEY`, `FIRECRAWL_API_KEY`.
+`CRAWL4AI_TOKEN`, `TAVILY_1_API_KEY`, `TAVILY_2_API_KEY`, `TAVILY_3_API_KEY`, `FIRECRAWL_API_KEY`.
 The Tavily and Firecrawl keys each enable **two** instances — the reader and the
 search provider — because both vendors sell search and extract off one key, out
 of one shared monthly pool. Search runs on every query and will drain that pool
@@ -221,7 +221,7 @@ take no key and are always on.
 Any external instance can be routed through its own **SOCKS5/HTTP proxy** by
 setting `<INSTANCE>_PROXY` — useful for clean egress past IP-based blocks (e.g.
 Cloudflare in front of Exa). Supported per instance: `EXA_PROXY`, `BRAVE_PROXY`, `SERPER_PROXY`,
-`JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `FIRECRAWL_PROXY`,
+`JINA_PROXY`, `TAVILY_1_PROXY`, `TAVILY_2_PROXY`, `TAVILY_3_PROXY`, `FIRECRAWL_PROXY`,
 `XMLRIVER_PROXY`, `PARALLEL_PROXY`, `OCTEN_PROXY`, `LINKUP_PROXY`,
 `YOUCOM_PROXY`, `BRIGHTDATA_PROXY`, `YOUTUBE_PROXY`, `SUPADATA_PROXY`,
 `INSTAGRAM_PROXY`, `SCHOLARLY_PROXY`, `OPENALEX_PROXY`,

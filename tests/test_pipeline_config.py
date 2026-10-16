@@ -312,13 +312,16 @@ def test_build_enables_expected_instances(monkeypatch, settings):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SEARXNG_URL", "http://searxng.test")
     monkeypatch.setenv("TAVILY_2_API_KEY", "t2")
+    monkeypatch.setenv("TAVILY_3_API_KEY", "t3")
     pipe = Pipeline.build(settings, client=httpx.AsyncClient())
     # searxng alone: duckduckgo steps aside when SEARXNG_URL is set (both would
     # hit the same DuckDuckGo from one IP); trafilatura+jina always-on plus
-    # tavily-2 on the read side.
+    # tavily-2 and tavily-3 on the read side.
     assert pipe.search_names == ["searxng"]
     assert "trafilatura" in pipe.read_names
     assert "jina" in pipe.read_names
     assert "tavily-2" in pipe.read_names
+    assert "tavily-3" in pipe.read_names
+    assert pipe.read_names.index("tavily-2") < pipe.read_names.index("tavily-3")  # failover order
     assert "tavily-1" not in pipe.read_names  # its key is unset
     assert "crawl4ai" not in pipe.read_names

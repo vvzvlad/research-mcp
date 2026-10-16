@@ -55,7 +55,7 @@ class Instance:
 # All instances that *could* run. An instance is actually enabled at startup
 # only if every required ENV var it names is set and its `disabled_by_env` var,
 # if any, is not (see pipeline.py). Multiple
-# instances of one type are allowed (tavily-1 / tavily-2 with different keys).
+# instances of one type are allowed (tavily-1 / tavily-2 / tavily-3 with different keys).
 # External (public-internet) instances carry a `proxy_env` so they can be routed
 # through a clean-egress SOCKS5/HTTP proxy (some are IP-blocked by Cloudflare).
 # No `proxy_env` for the instances that do not need clean egress: the internal
@@ -180,6 +180,7 @@ INSTANCES: list[Instance] = [
     Instance("crawl4ai", "crawl4ai", url_env="CRAWL4AI_URL", token_env="CRAWL4AI_TOKEN"),
     Instance("tavily-1", "tavily", api_key_env="TAVILY_1_API_KEY", proxy_env="TAVILY_1_PROXY"),
     Instance("tavily-2", "tavily", api_key_env="TAVILY_2_API_KEY", proxy_env="TAVILY_2_PROXY"),
+    Instance("tavily-3", "tavily", api_key_env="TAVILY_3_API_KEY", proxy_env="TAVILY_3_PROXY"),
     Instance("firecrawl", "firecrawl", api_key_env="FIRECRAWL_API_KEY", proxy_env="FIRECRAWL_PROXY"),
     # Last resort of the read chain: an anti-bot unlocker for the pages every
     # other provider bounces off (marketplaces, Cloudflare interstitials). Two
@@ -245,6 +246,7 @@ READ_PIPELINE: list[str] = [
     "crawl4ai",
     "tavily-1",
     "tavily-2",
+    "tavily-3",
     "firecrawl",
     "brightdata",
 ]
