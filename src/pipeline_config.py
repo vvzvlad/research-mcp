@@ -93,17 +93,20 @@ INSTANCES: list[Instance] = [
     # need no new secret and light up the moment the reader key is present.
     #
     # They are NOT free: the key has ONE monthly pool shared by both products.
-    # Search runs on every web_search while these readers win few reads, so
-    # search is what empties the pool, and then the readers fail too. Firecrawl
-    # signals it with a 402; Tavily's status is undocumented, and _CREDIT_MARKERS
-    # may not match its wording. It cannot be turned off per product — pulling
-    # the key disables the reader as well.
-    #
-    # The pool is 1000 calls a month; these readers sit 4th and 6th in the read
-    # chain and win ~1% of reads (19-27 a month). Losing them when search drains
-    # the pool is a deliberate trade: the chain has five other readers.
+    # Search runs on every web_search while these readers win few reads (~1%,
+    # 19-27 a month), so search is what empties the pool. A spent Tavily key
+    # (HTTP 432) hands the search to the next one: api_key_2/api_key_3 below
+    # name the reader failover keys TAVILY_2_API_KEY / TAVILY_3_API_KEY, so
+    # search and readers together drain all three accounts before either half
+    # stops working. Firecrawl has no spare key: it signals a spent pool with
+    # a 402, and then both of its halves stop. Neither product can be turned
+    # off — pulling the key disables the reader as well.
     Instance(
-        "tavily-search", "tavily_search", api_key_env="TAVILY_1_API_KEY", proxy_env="TAVILY_1_PROXY"
+        "tavily-search",
+        "tavily_search",
+        api_key_env="TAVILY_1_API_KEY",
+        proxy_env="TAVILY_1_PROXY",
+        options_env=(("api_key_2", "TAVILY_2_API_KEY"), ("api_key_3", "TAVILY_3_API_KEY")),
     ),
     Instance(
         "firecrawl-search",

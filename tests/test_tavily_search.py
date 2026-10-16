@@ -1,4 +1,5 @@
-"""Tavily search provider: response parsing, request body, country heuristic.
+"""Tavily search provider: response parsing, request body, country heuristic,
+key failover.
 
 The payload mirrors the shape documented for POST https://api.tavily.com/search
 (top-level ``query``/``answer``/``images``/``results``; the snippet lives in
@@ -191,9 +192,7 @@ async def test_latin_query_sends_no_country(make_config, query):
 @respx.mock
 async def test_out_of_credits_is_a_provider_error_without_retry(make_config):
     # 402 here exercises the SHARED policy in _http.py, not a measured Tavily
-    # behaviour: what status Tavily actually returns on an exhausted pool is
-    # unverified and its docs publish none — see the instance comment in
-    # src/pipeline_config.py.
+    # behaviour — Tavily answers its own spent-plan status, 432, covered below.
     route = respx.post(TAVILY_SEARCH_ENDPOINT).mock(return_value=httpx.Response(402))
     provider = TavilySearch(make_config("tavily_search", api_key="k"))
     async with httpx.AsyncClient() as client:
@@ -249,3 +248,60 @@ async def test_server_error_uses_the_shared_retry_budget(make_config):
 def test_requires_an_api_key(make_config):
     with pytest.raises(ValueError):
         TavilySearch(make_config("tavily_search"))
+
+
+# -- key failover ----------------------------------------------------------
+
+
+@respx.mock
+@pytest.mark.parametrize("status", [402, 429, 432])
+async def test_spent_or_throttled_key_fails_over_to_the_spare(make_config, status):
+    # A key the vendor reports as spent (402/432) or throttled (429) costs no
+    # credit, so the query moves on to the spare key instead of failing: same
+    # endpoint, next Authorization header, and the answer parses normally.
+    route = respx.post(TAVILY_SEARCH_ENDPOINT).mock(
+        side_effect=[httpx.Response(status), httpx.Response(200, json=TAVILY_PAYLOAD)]
+    )
+    provider = TavilySearch(
+        make_config("tavily_search", api_key="k1", options={"api_key_2": "k2"})
+    )
+    async with httpx.AsyncClient() as client:
+        results = await provider.search(client, "q", 5, None)
+    assert [r.url for r in results] == ["https://tavily.test/1", "https://tavily.test/2"]
+    assert [c.request.headers["Authorization"] for c in route.calls] == [
+        "Bearer k1",
+        "Bearer k2",
+    ]
+
+
+@respx.mock
+async def test_all_spare_keys_spent_raise_out_of_credits(make_config):
+    # Three spent keys in a row: the last key's error is the search's error.
+    route = respx.post(TAVILY_SEARCH_ENDPOINT).mock(
+        side_effect=[httpx.Response(432, text="plan exhausted") for _ in range(3)]
+    )
+    provider = TavilySearch(
+        make_config(
+            "tavily_search", api_key="k1", options={"api_key_2": "k2", "api_key_3": "k3"}
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await provider.search(client, "q", 5, None)
+    assert excinfo.value.reason == failure_reason.NO_CREDITS
+    assert excinfo.value.exhausts_quota is True
+    assert route.call_count == 3
+
+
+@respx.mock
+async def test_server_error_stays_on_the_first_key(make_config):
+    # A 5xx is transient, not spent: the retry budget runs on key 1 and the
+    # spare keys are not spent on it.
+    route = respx.post(TAVILY_SEARCH_ENDPOINT).mock(return_value=httpx.Response(500))
+    config = make_config("tavily_search", api_key="k1", options={"api_key_2": "k2"})
+    provider = TavilySearch(config)
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderError):
+            await provider.search(client, "q", 5, None)
+    assert route.call_count == config.retries + 1
+    assert {c.request.headers["Authorization"] for c in route.calls} == {"Bearer k1"}

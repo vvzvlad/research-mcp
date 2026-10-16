@@ -48,7 +48,16 @@ _CYRILLIC_RE = re.compile(r"[Ѐ-ӿ]")
 
 @register("tavily_search")
 class TavilySearch:
-    """Web search via the Tavily Search API (requires ``api_key``)."""
+    """Web search via the Tavily Search API (requires ``api_key``).
+
+    Keys: ``api_key`` first, then the optional ``options["api_key_2"]`` and
+    ``options["api_key_3"]`` (other Tavily accounts). Unlike the readers, which
+    are separate instances tried one after another, every search instance runs on
+    each query concurrently — a second search instance would spend a credit on
+    every key for every query. So the failover between keys lives here: a key the
+    vendor reports as spent or throttled (402/429/432) hands the query to the next
+    key, any other failure ends the search as before.
+    """
 
     def __init__(self, config: ProviderConfig) -> None:
         if not config.api_key:
@@ -56,6 +65,9 @@ class TavilySearch:
         self.name = config.name
         self.proxy = config.proxy
         self._config = config
+        self._keys = [config.api_key] + [
+            key for name in ("api_key_2", "api_key_3") if (key := config.options.get(name))
+        ]
 
     async def search(
         self,
@@ -86,21 +98,31 @@ class TavilySearch:
             # script — not the subject — is what this test can see.
             body["country"] = TAVILY_CYRILLIC_COUNTRY
 
-        response = await request_with_retry(
-            client,
-            "POST",
-            TAVILY_SEARCH_ENDPOINT,
-            json=body,
-            headers={"Authorization": f"Bearer {self._config.api_key}"},
-            # Unlike brave, this provider does use the shared retry budget:
-            # Tavily has no per-second plan limit and there is no local throttle
-            # here, so a retry 0.3s later is a plain second attempt, not a
-            # request racing its own rate-limit window.
-            retries=self._config.retries,
-            provider=self.name,
-            # Tavily signals a spent monthly plan with the non-standard HTTP 432.
-            out_of_credits_statuses=frozenset({432}),
-        )
+        for index, key in enumerate(self._keys):
+            try:
+                response = await request_with_retry(
+                    client,
+                    "POST",
+                    TAVILY_SEARCH_ENDPOINT,
+                    json=body,
+                    headers={"Authorization": f"Bearer {key}"},
+                    # Unlike brave, this provider does use the shared retry
+                    # budget: Tavily has no per-second plan limit and there is no
+                    # local throttle here, so a retry 0.3s later is a plain second
+                    # attempt, not a request racing its own rate-limit window.
+                    retries=self._config.retries,
+                    provider=self.name,
+                    # Tavily signals a spent monthly plan with the non-standard
+                    # HTTP 432.
+                    out_of_credits_statuses=frozenset({432}),
+                )
+                break
+            except ProviderError as exc:
+                # Only a spent or throttled key moves on to the next one; the
+                # last key's error is the search's error. A spent key costs no
+                # credit, so trying it again first on every query is cheap.
+                if not exc.exhausts_quota or index == len(self._keys) - 1:
+                    raise
         try:
             data = response.json()
         except ValueError as exc:

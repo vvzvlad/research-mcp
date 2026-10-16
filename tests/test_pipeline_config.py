@@ -34,9 +34,21 @@ def test_instances_store_env_names_not_values():
     assert _inst("searxng").proxy_env is None
     assert _inst("crawl4ai").proxy_env is None
     assert _inst("trafilatura").proxy_env is None
+    # The search half of the Tavily key fails over through the reader keys: its
+    # options_env names the SAME vars the read instances tavily-2/tavily-3 use.
+    assert _inst("tavily-search").options_env == (
+        ("api_key_2", "TAVILY_2_API_KEY"),
+        ("api_key_3", "TAVILY_3_API_KEY"),
+    )
     # No field looks like a real secret/url value.
     for inst in INSTANCES:
-        for attr in (inst.url_env, inst.api_key_env, inst.token_env, inst.proxy_env):
+        for attr in (
+            inst.url_env,
+            inst.api_key_env,
+            inst.token_env,
+            inst.proxy_env,
+            *(env for _, env in inst.options_env),
+        ):
             if attr is not None:
                 assert attr.isupper()
                 assert "://" not in attr

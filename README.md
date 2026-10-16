@@ -151,7 +151,10 @@ that report an empty balance with some other 4xx — serper answers `400 {"messa
 "Not enough credits"}`, octen `403 "Insufficient balance"` — are recognised by
 the body and logged as `out of credits` too, so an unpaid account never reads as
 a broken API. Tavily's non-standard HTTP 432 (a spent monthly plan) is read as
-`out of credits` as well.
+`out of credits` as well. The `tavily-search` instance walks its keys on those
+same statuses — `TAVILY_1_API_KEY` first, then the reader failover keys — so
+search and the readers together drain all three Tavily accounts before anything
+stops working.
 
 An instance is **enabled** only if its required env var(s) are set; otherwise it
 is skipped with a log line. `duckduckgo` and `trafilatura` need no config
@@ -206,7 +209,10 @@ the search reranker; the reader alone also works keyless), `CRAWL4AI_URL` +
 The Tavily and Firecrawl keys each enable **two** instances — the reader and the
 search provider — because both vendors sell search and extract off one key, out
 of one shared monthly pool. Search runs on every query and will drain that pool
-well before the readers do; when it runs out, both halves stop working.
+well before the readers do; when a Tavily key runs out, the search fails over to
+the readers' spare keys (`TAVILY_2_API_KEY`, `TAVILY_3_API_KEY`). Firecrawl has
+one key and no spare: once its pool is empty, both `firecrawl-search` and the
+`firecrawl` reader stop until the plan resets.
 Keyless until registered: `XMLRIVER_USER_ID` + `XMLRIVER_API_KEY` (Yandex SERP),
 `PARALLEL_API_KEY`, `OCTEN_API_KEY`, `LINKUP_API_KEY`, `YOUCOM_API_KEY`, and
 `BRIGHTDATA_API_KEY` + `BRIGHTDATA_ZONE`. `OPENALEX_API_KEY` and
