@@ -1552,6 +1552,51 @@ def test_extract_markdown_uses_precision(monkeypatch):
     assert captured_kwargs.get("include_comments") is False
 
 
+def test_extract_markdown_drops_a_hidden_block_crowned_over_the_article():
+    # A product card: a short description in <article>, and a terms-of-sale
+    # modal the page keeps in the DOM (hidden by CSS) with far more text.
+    # trafilatura's cascade alone serves the modal as the page; the read must
+    # hand the page to the next reader instead.
+    desc = (
+        "The backup power module feeds the controller, its extension modules and "
+        "the USB devices for up to five hours, depending on the load and the modem. "
+    )
+    terms = (
+        "These terms of sale govern every retail order placed through the online "
+        "store and form a public offer addressed to private and corporate buyers. "
+    )
+    html = (
+        "<html><body><main><article><h1>WBMZ6-BATTERY</h1>"
+        f"<p>{desc * 3}</p></article></main>"
+        "<div id='modal'><h3>Terms of sale</h3>"
+        + "".join(f"<p>{i}. {terms * 2}</p>" for i in range(1, 14))
+        + "</div></body></html>"
+    )
+    assert extract_markdown(html) == ""
+
+
+@pytest.mark.parametrize(
+    ("own", "full", "expected"),
+    [
+        # The structural pick found nothing; the cascade's rescue is kept
+        # (forum threads read this way).
+        ("", "Thread opening post and replies.", "Thread opening post and replies."),
+        # The cascade extends the structural pick with more of the same text.
+        ("Part one.", "Intro. Part one. Part two.", "Intro. Part one. Part two."),
+        # The cascade swapped the pick for another block of the page.
+        ("Product description.", "Terms of sale, clause one.", ""),
+    ],
+)
+def test_extract_markdown_keeps_the_cascade_only_when_it_extends_the_pick(
+    monkeypatch, own, full, expected
+):
+    monkeypatch.setattr(
+        "src.providers.trafilatura._trafilatura.extract",
+        lambda html, *, fast, **kwargs: own if fast else full,
+    )
+    assert extract_markdown("<html></html>") == expected
+
+
 @respx.mock
 async def test_scanned_pdf_falls_through_to_the_read_chain(monkeypatch, settings):
     # A PDF with no text layer is a scan. pypdf parses it but has no text to

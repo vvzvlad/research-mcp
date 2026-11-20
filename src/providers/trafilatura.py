@@ -7,6 +7,8 @@ enabled and goes first in the read pipeline.
 
 from __future__ import annotations
 
+import re
+
 import httpx
 import trafilatura as _trafilatura
 
@@ -20,13 +22,16 @@ from src.providers.base import (
 from src.providers.registry import register
 
 
-def extract_markdown(html: str) -> str:
-    """Extract main-content Markdown from an HTML string (pure, no I/O).
+# Share of the structural pick's words that must reappear in the full cascade's
+# answer for the two to count as the same text (see extract_markdown). Measured
+# on 199 pages from the prod read log: a cascade answer that extends the
+# structural pick keeps 0.74-1.00 of its words, one that swaps it for another
+# block of the page keeps 0.00-0.27.
+_MIN_SHARED_WORDS = 0.5
+_WORD = re.compile(r"\w+")
 
-    Returns ``""`` when nothing extractable is found. Exposed so the pipeline can
-    reuse an already-downloaded page body (the PDF-probe fetch) without GETting
-    the same url a second time.
-    """
+
+def _extract(html: str, *, fast: bool) -> str:
     # favor_precision keeps clean main content and drops nav/boilerplate (menus,
     # footers, logos). The trade-off is under-extraction: when precision returns
     # too little, the pipeline's fallback chain escalates to a heavier reader, so
@@ -37,9 +42,43 @@ def extract_markdown(html: str) -> str:
             output_format="markdown",
             include_comments=False,
             favor_precision=True,
+            fast=fast,
         )
         or ""
     ).strip()
+
+
+def _words(text: str) -> set[str]:
+    return {word.lower() for word in _WORD.findall(text)}
+
+
+def extract_markdown(html: str) -> str:
+    """Extract main-content Markdown from an HTML string (pure, no I/O).
+
+    Returns ``""`` when nothing extractable is found, or when trafilatura's own
+    extractors disagree on which block of the page is the main content. Exposed
+    so the pipeline can reuse an already-downloaded page body (the PDF-probe
+    fetch) without GETting the same url a second time.
+    """
+    full = _extract(html, fast=False)
+    if not full:
+        return ""
+    # trafilatura's cascade lets readability replace its own structural pick
+    # (<article>, <main>) when its text is twice as long, and justext replace
+    # the result when its text is at least a quarter as long: it compares
+    # length, not position. That rescue is what reads forum threads and docs
+    # pages whose article tag holds only part of the text, but it also crowns a
+    # long block the page keeps hidden in the DOM — a terms-of-sale modal on
+    # every product card wins over a short product description. fast=True is the
+    # structural pick alone (~3 ms more on a 100 KB page). When the cascade's
+    # answer holds less than half of the pick's words, it is another block of
+    # the page, neither can be trusted, and the page goes to the next reader in
+    # the chain, which returns the whole page.
+    own = _extract(html, fast=True)
+    own_words = _words(own)
+    if own_words and len(own_words & _words(full)) < _MIN_SHARED_WORDS * len(own_words):
+        return ""
+    return full
 
 
 @register("trafilatura")
